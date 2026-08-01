@@ -539,6 +539,17 @@
             (error (trim stderr))))
         (error "mkdir: could not spawn process"))))
 
+(define (forest-run-touch! path)
+  (let ([proc (~> (command "touch" (list path))
+                  with-stdout-piped
+                  with-stderr-piped
+                  spawn-process)])
+    (if (Ok? proc)
+        (let ([stderr (read-port-to-string (child-stderr (Ok->value proc)))])
+          (when (not (string=? (trim stderr) ""))
+            (error (trim stderr))))
+        (error "touch: could not spawn process"))))
+
 (define (forest-prompt-create!)
   (define entry (forest-current-entry))
   (when entry
@@ -560,10 +571,9 @@
               (if (ends-with? name (path-separator))
                   (forest-run-mkdir-p! full)
                   (begin
-                    (helix.vsplit-new)
-                    (helix.open full)
-                    (helix.write full)
-                    (helix.quit)))
+                    (forest-run-mkdir-p! (forest-parent-path full))
+                    (forest-run-touch! full)
+                    (helix.open full)))
               (forest-info (string-append "created " name))))
           (enqueue-thread-local-callback forest-refresh-all!)))))))
 
@@ -1153,10 +1163,9 @@
             (if (ends-with? name (path-separator))
                 (forest-run-mkdir-p! full)
                 (begin
-                  (helix.vsplit-new)
-                  (helix.open full)
-                  (helix.write full)
-                  (helix.quit)))
+                  (forest-run-mkdir-p! (forest-parent-path full))
+                  (forest-run-touch! full)
+                  (helix.open full)))
             (forest-info (string-append "created " name))))
         (enqueue-thread-local-callback forest-mini-refresh-active!))))))
 
