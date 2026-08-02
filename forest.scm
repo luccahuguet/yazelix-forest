@@ -19,6 +19,13 @@
 (define *forest-search-height* 3)
 (define *forest-side* 'left) ; left or right set with forest-configure!
 (define *forest-show-separator?* #t)
+(define *forest-bg-focused* #f)
+(define *forest-bg-unfocused* #f)
+(define *forest-search-color-focused* #f)
+(define *forest-search-color-unfocused* #f)
+(define *forest-search-default-focused* "#ffa500")
+(define *forest-search-default-unfocused* "#ffffff")
+(define *forest-search-follow-focus?* #t)
 
 (define *forest-ignore-set*
   (hashset ".git" "target" ".direnv" "node_modules" "__pycache__" ".hg"))
@@ -136,6 +143,8 @@
 (provide forest-configure!)
 (provide forest-set-style!)
 (provide forest-set-keybinds!)
+(provide forest-set-sidebar-bg!)
+(provide forest-set-search-color!)
 
 ;;@doc
 ;; Override any subset of forest's keybindings from init.scm
@@ -163,6 +172,37 @@
 ;; Pick which explorer UI forest-open uses: 'snacks or 'mini
 (define (forest-set-style! style)
   (set! *forest-style* style))
+
+;; #rrggbb string to a Color, or #f on anything unparseable
+(define (forest-hex->color hex)
+  (and (string? hex) (with-handler (lambda (_) #f) (glyph-hex->color hex))))
+
+;;@doc
+;; Give the snacks sidebar its own background per focus state
+(define (forest-set-sidebar-bg! #:focused [focused #f] #:unfocused [unfocused #f])
+  (set! *forest-bg-focused* (forest-hex->color focused))
+  (set! *forest-bg-unfocused* (forest-hex->color unfocused)))
+
+;; the sidebar background for the current focus state, or #f for the theme default
+(define (forest-panel-bg-color)
+  (if *forest-focused* *forest-bg-focused* *forest-bg-unfocused*))
+
+;;@doc
+;; Color the snacks search box per focus mode
+(define (forest-set-search-color! #:focused [focused #f]
+                                   #:unfocused [unfocused #f]
+                                   #:always [always #f]
+                                   #:follow-focus? [follow-focus? #t])
+  (define both (forest-hex->color always))
+  (set! *forest-search-color-focused* (or both (forest-hex->color focused)))
+  (set! *forest-search-color-unfocused* (or both (forest-hex->color unfocused)))
+  (set! *forest-search-follow-focus?* (if both #f follow-focus?)))
+
+;; search box outline color for the current focus state
+(define (forest-search-color)
+  (if (or (not *forest-search-follow-focus?*) *forest-focused*)
+      (or *forest-search-color-focused* (forest-hex->color *forest-search-default-focused*))
+      (or *forest-search-color-unfocused* (forest-hex->color *forest-search-default-unfocused*))))
 
 ;; keep the panel off the rows moka's bars uses
 (define *forest-reserved-top-fn* 'unresolved)
@@ -989,12 +1029,18 @@
       (set-editor-clip-right! w)
       (set-editor-clip-left! w))
 
-  ;; theme components
-  (define bg-style (theme-scope-ref "ui.background"))
-  (define text-style (theme-scope-ref "ui.text"))
-  (define hl-style (theme-scope-ref "ui.menu.selected"))
-  (define dir-style (theme-scope-ref "ui.text.info"))
-  (define dim-style (style-with-dim (theme-scope-ref "ui.text")))
+  ;; theme components a configured sidebar background tints only these panel
+  ;; styles, so the buffer keeps the theme background
+  (define panel-bg (forest-panel-bg-color))
+  (define (forest-with-panel-bg s) (if panel-bg (style-bg s panel-bg) s))
+  (define bg-style (forest-with-panel-bg (theme-scope-ref "ui.background")))
+  (define text-style (forest-with-panel-bg (theme-scope-ref "ui.text")))
+  ;; the selection and the title dim while the editor holds focus
+  (define hl-base (theme-scope-ref "ui.menu.selected"))
+  (define hl-style (if *forest-focused* hl-base (style-with-dim hl-base)))
+  (define dir-style (forest-with-panel-bg (theme-scope-ref "ui.text.info")))
+  (define dim-style (forest-with-panel-bg (style-with-dim (theme-scope-ref "ui.text"))))
+  (define title-style (if *forest-focused* (style-with-bold dir-style) dim-style))
 
   ;; no border for cleaner look
   (define panel-area (area x0 y0 w panel-h))
@@ -1012,12 +1058,18 @@
   (define box-w (if left-divider? (- w 3) w))
 
   (define search-area (area box-x y0 box-w *forest-search-height*))
-  (block/render frame search-area (make-block bg-style border-style "all" "rounded"))
+  ;; outline color marks focus
+  (define search-line (forest-search-color))
+  (define search-border-style
+    (if search-line
+        (style-fg bg-style search-line)
+        (forest-with-panel-bg (theme-scope-ref "ui.text"))))
+  (block/render frame search-area (make-block bg-style search-border-style "all" "rounded"))
 
   (define title "Explorer")
   (when (> box-w (+ (string-length title) 4))
     (frame-set-string! frame (+ box-x (quotient (- box-w (string-length title)) 2)) y0
-                        title (style-with-bold dir-style)))
+                        title title-style))
 
   (define prompt (string-append *forest-query-prefix* *forest-query*))
   (define prompt-shown (forest-truncate prompt (- box-w 2)))
