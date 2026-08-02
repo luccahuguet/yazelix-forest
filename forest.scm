@@ -117,6 +117,7 @@
         'toggle-git-ignored "i"
         'wider "+"
         'narrower "-"
+        'menu " " ; space key
         'quit "q"))
 
 (define *forest-keybinds* *forest-default-keybinds*)
@@ -193,6 +194,132 @@
 
 (define (forest-repeat-str s n)
   (if (<= n 0) "" (string-append s (forest-repeat-str s (- n 1)))))
+
+(struct ForestHelpState ())
+(define *forest-help-open?* #f)
+(define *forest-help-style* 'snacks)
+(define *forest-help-dispatch* #f)
+
+;; the bound key for an action with fallback to ?
+(define (forest-help-key action)
+  (define k (hash-try-get *forest-keybinds* action))
+  (cond
+    [(equal? k " ") "space"]
+    [(and (string? k) (not (equal? k ""))) k]
+    [else "?"]))
+
+;; snaks keybinds
+(define (forest-snacks-help-rows)
+  (list
+   (list (string-append (forest-help-key 'down) " / " (forest-help-key 'up) " / ↑ / ↓") "Navigate")
+   (list "Enter" "Open file or toggle dir")
+   (list "Tab" "Toggle directory")
+   (list (forest-help-key 'search) "Fuzzy search")
+   (list (forest-help-key 'create) "Create file or dir")
+   (list (forest-help-key 'rename) "Rename entry")
+   (list (forest-help-key 'delete) "Delete entry")
+   (list (forest-help-key 'refresh) "Refresh tree")
+   (list (forest-help-key 'toggle-hidden) "Toggle dotfiles")
+   (list (forest-help-key 'toggle-git-ignored) "Toggle git-ignored")
+   (list (string-append (forest-help-key 'wider) " / " (forest-help-key 'narrower)) "Widen or narrow panel")
+   (list "Esc" "Focus editor")
+   (list (forest-help-key 'quit) "Close panel")))
+
+;; mini keybinds
+(define (forest-mini-help-rows)
+  (list
+   (list (string-append (forest-help-key 'down) " / " (forest-help-key 'up) " / ↑ / ↓") "Move")
+   (list (string-append (forest-help-key 'enter) " / → / Enter") "Open file or enter dir")
+   (list (string-append (forest-help-key 'back) " / ←") "Parent column")
+   (list (forest-help-key 'search) "Fuzzy search")
+   (list (forest-help-key 'create) "Create file or dir")
+   (list (forest-help-key 'rename) "Rename entry")
+   (list (forest-help-key 'delete) "Delete entry")
+   (list (forest-help-key 'refresh) "Refresh column")
+   (list (forest-help-key 'toggle-hidden) "Toggle dotfiles")
+   (list (forest-help-key 'toggle-git-ignored) "Toggle git-ignored")
+   (list (string-append (forest-help-key 'wider) " / " (forest-help-key 'narrower)) "Widen or narrow")
+   (list (string-append "Esc / " (forest-help-key 'quit)) "Close")))
+
+;; helix style box tucked into the bottom right corner
+(define (forest-help-metrics rect rows)
+  (define key-w (apply max (cons 1 (map (lambda (r) (string-length (car r))) rows))))
+  (define desc-w (apply max (cons 1 (map (lambda (r) (string-length (cadr r))) rows))))
+  (define content-w (+ key-w 2 desc-w))
+  (define w (min (max 0 (- (area-width rect) 2)) (+ content-w 4)))
+  ;; two borders around one row per binding
+  (define h (min (max 0 (- (area-height rect) 2)) (+ (length rows) 2)))
+  ;; placed above the reserved line e.g for moka statusline
+  (define bottom (+ (forest-reserved-bottom) 1))
+  (define x (max 0 (- (area-width rect) w)))
+  (define y (max 0 (- (area-height rect) h bottom)))
+  (list x y w h key-w))
+
+(define (forest-help-render state rect frame)
+  (define rows (if (equal? *forest-help-style* 'mini) (forest-mini-help-rows) (forest-snacks-help-rows)))
+
+  (define bg-style (theme-scope-ref "ui.menu"))
+  (define text-style (theme-scope-ref "ui.text"))
+  (define key-style (style-with-bold (theme-scope-ref "ui.text.info")))
+  (define border-style (style-with-dim text-style))
+
+  (define m (forest-help-metrics rect rows))
+  (define x (list-ref m 0))
+  (define y (list-ref m 1))
+  (define w (list-ref m 2))
+  (define h (list-ref m 3))
+  (define key-w (list-ref m 4))
+
+  (define box (area x y w h))
+  (define inner-x (+ x 1))
+
+  (buffer/clear-with frame box bg-style)
+  (block/render frame box (make-block bg-style border-style "all" "plain"))
+
+  (let loop ([rs rows] [row 0])
+    (when (and (pair? rs) (< row (- h 2)))
+      (define r (car rs))
+      (define ry (+ y 1 row))
+      (define dx (+ inner-x 1 key-w 2))
+      (define avail (max 0 (- (+ x w) 1 dx)))
+      (frame-set-string! frame (+ inner-x 1) ry (car r) key-style)
+      (frame-set-string! frame dx ry (forest-truncate (cadr r) avail) text-style)
+      (loop (cdr rs) (+ row 1)))))
+
+;; pressing a listed key runs that action and closes and esc or space
+;; closes without running anything
+(define (forest-help-handle-event state event)
+  (define ch (key-event-char event))
+  (cond
+    [(mouse-event? event) event-result/consume]
+    [(key-event-escape? event) (set! *forest-help-open?* #f) event-result/close]
+    [(char? ch)
+     (define action (forest-action-for-char ch))
+     (define dispatch *forest-help-dispatch*)
+     (set! *forest-help-open?* #f)
+     (when (and action dispatch (not (equal? action 'menu)))
+       ;; deferred so the menu is gone before the action pushes a modal of its own
+       (enqueue-thread-local-callback (lambda () (dispatch action))))
+     event-result/close]
+    [else (set! *forest-help-open?* #f) event-result/close]))
+
+;; pops the popup from outside its own handler, e.g. when the explorer closes
+(define (forest-help-dismiss!)
+  (when *forest-help-open?*
+    (set! *forest-help-open?* #f)
+    (pop-last-component-by-name! "forest-help")))
+
+;; space opens the which-key menu
+(define (forest-whichkey-open! style dispatch)
+  (unless *forest-help-open?*
+    (set! *forest-help-style* style)
+    (set! *forest-help-dispatch* dispatch)
+    (set! *forest-help-open?* #t)
+    (push-component!
+     (new-component! "forest-help"
+                     (ForestHelpState)
+                     forest-help-render
+                     (hash "handle_event" forest-help-handle-event)))))
 
 ;; strips the workspace prefix so prompts show a short path instead of the full one
 (define (forest-relpath path)
@@ -418,6 +545,7 @@
 
 (define (forest-close!)
   (forest-reset-mouse!)
+  (forest-help-dismiss!)
   (set! *forest-active* #f)
   (set! *forest-focused* #f)
   (pop-last-component-by-name! "forest-fg")
@@ -1087,6 +1215,7 @@
     [(equal? action 'toggle-git-ignored) (forest-toggle-git-ignored!) event-result/consume]
     [(equal? action 'wider) (forest-wider!) event-result/consume]
     [(equal? action 'narrower) (forest-narrower!) event-result/consume]
+    [(equal? action 'menu) (forest-whichkey-open! 'snacks forest-command-action!) event-result/consume]
     [(equal? action 'quit) (forest-close!) event-result/close]
     [else event-result/consume]))
 
@@ -1154,6 +1283,7 @@
 (define (forest-handle-event-fg state event)
   (cond
     [*forest-modal-open?* event-result/ignore]
+    [*forest-help-open?* event-result/ignore]
     ;; ahead of the typing branch so the tree stays clickable mid-query
     [(mouse-event? event) (forest-handle-mouse-fg state event)]
     [else
@@ -1246,6 +1376,7 @@
 
 (define (forest-mini-close!)
   (forest-reset-mouse!)
+  (forest-help-dismiss!)
   (set! *forest-active* #f)
   (pop-last-component-by-name! "forest-mini"))
 
@@ -1755,6 +1886,7 @@
     [(equal? action 'toggle-git-ignored) (forest-toggle-git-ignored!) event-result/consume]
     [(equal? action 'wider) (forest-mini-wider!) event-result/consume]
     [(equal? action 'narrower) (forest-mini-narrower!) event-result/consume]
+    [(equal? action 'menu) (forest-whichkey-open! 'mini forest-mini-command-action!) event-result/consume]
     [else event-result/consume]))
 
 (define (forest-mini-handle-keys state event)
@@ -1779,6 +1911,7 @@
   (cond
     ;; do not register keys when doing new/rename
     [*forest-modal-open?* event-result/ignore]
+    [*forest-help-open?* event-result/ignore]
     [(mouse-event? event) (forest-mini-handle-mouse state event)]
     [else
      ;; any keypress can move the cursor, so an armed entry stops meaning anything

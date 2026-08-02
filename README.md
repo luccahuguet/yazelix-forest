@@ -65,6 +65,7 @@ Bind `:forest-open` to a key, e.g. in `init.scm`:
 | `g` | Toggle dotfiles (`.env`, `.git`, etc.) |
 | `i` | Toggle git-ignored entries |
 | `+` / `-` | Widen / narrow the panel |
+| `Space` | Open the which-key menu; press any listed key to run its action (`Esc` dismisses) |
 | `Esc` | Switch focus to the editor, panel stays open |
 | `q` | Close the panel |
 
@@ -93,6 +94,7 @@ Opening or refocusing the tree reveals and centers whatever file is currently op
 | `g` | Toggle dotfiles (`.env`, `.git`, etc.) |
 | `i` | Toggle git-ignored entries |
 | `+` / `-` | Widen / narrow the columns |
+| `Space` | Open the which-key menu; press any listed key to run its action (`Esc` dismisses) |
 | `Esc` / `q` | Close |
 
 Opening the tree reveals whatever file is currently open in the editor, cascading a column for each ancestor directory along the way.
@@ -107,6 +109,7 @@ Opening the tree reveals whatever file is currently open in the editor, cascadin
 
 ## Notes
 
+- Press `Space` opens the which-key menu in the bottom right corner, and when pressed any listed key to run its action.
 - Mouse support needs Helix's own `editor.mouse` left on (it is by default).
 - Two clicks on an entry activate it. They needn't be quick, but a keypress in between cancels.
 - Requires [notify.hx](https://github.com/chuwy/notify.hx) (pulled in automatically as a dependency) for create/rename/delete notifications.
