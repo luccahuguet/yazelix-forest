@@ -981,7 +981,10 @@
   ;; panel spans only the rows not reserved by the bars
   (define y0 (forest-reserved-top))
   (define panel-h (max 1 (- h y0 (forest-reserved-bottom))))
-  (set! *forest-visible-height* (max 1 (- panel-h *forest-search-height*)))
+  ;; native statusline still owns the last row unless moka reserved the bottom
+  (define statusline-rows (if (> (forest-reserved-bottom) 0) 0 1))
+  ;; the list fills from just under the search box down to just above the statusline
+  (set! *forest-visible-height* (max 1 (- panel-h *forest-search-height* statusline-rows)))
   (if (equal? *forest-side* 'right)
       (set-editor-clip-right! w)
       (set-editor-clip-left! w))
@@ -1000,36 +1003,47 @@
   ;; border matches bg so it blends in instead of clashing across themes;
   (define border-style bg-style)
 
-  (define search-area (area x0 y0 w *forest-search-height*))
+  ;; on the divider side reserve the last column for the line
+  ;; entries stay flush left and fill up to one gap column before it
+  (define left-divider? (and *forest-show-separator?* (not (equal? *forest-side* 'right))))
+  (define list-w (if left-divider? (- w 2) w))
+  ;; the search box is centred between the left edge and the divider
+  (define box-x (if left-divider? (+ x0 1) x0))
+  (define box-w (if left-divider? (- w 3) w))
+
+  (define search-area (area box-x y0 box-w *forest-search-height*))
   (block/render frame search-area (make-block bg-style border-style "all" "rounded"))
 
   (define title "Explorer")
-  (when (> w (+ (string-length title) 4))
-    (frame-set-string! frame (+ x0 (quotient (- w (string-length title)) 2)) y0
+  (when (> box-w (+ (string-length title) 4))
+    (frame-set-string! frame (+ box-x (quotient (- box-w (string-length title)) 2)) y0
                         title (style-with-bold dir-style)))
 
   (define prompt (string-append *forest-query-prefix* *forest-query*))
-  (define prompt-shown (forest-truncate prompt (- w 2)))
-  (frame-set-string! frame (+ x0 1) (+ y0 1) prompt-shown text-style)
+  (define prompt-shown (forest-truncate prompt (- box-w 2)))
+  (frame-set-string! frame (+ box-x 1) (+ y0 1) prompt-shown text-style)
 
   (when (forest-searching?)
     (define counter (string-append (number->string (length *forest-search-results*))
                                     "/" (number->string (length *forest-all-files*))))
-    (define counter-x (- (+ x0 w) 1 (string-length counter)))
-    (when (>= counter-x (+ x0 2 (string-length prompt-shown)))
+    (define counter-x (- (+ box-x box-w) 1 (string-length counter)))
+    (when (>= counter-x (+ box-x 2 (string-length prompt-shown)))
       (frame-set-string! frame counter-x (+ y0 1) counter dim-style)))
 
-  ;; line marking the boundary with the text buffer, spanning the panel row
   (when *forest-show-separator?*
-    (define sep-x (if (equal? *forest-side* 'right) (- x0 1) w))
+    (define sep-x (if (equal? *forest-side* 'right) (- x0 1) (- (+ x0 w) 1)))
+    ;; runs the full panel height, from the reserved top down to just above the
+    ;; statusline, so it respects moka's bufferline and statusline rows
+    (define sep-top y0)
+    (define sep-bottom (- (+ y0 panel-h) statusline-rows 1))
     (when (and (>= sep-x 0) (< sep-x (area-width rect)))
-      (let loop ([y y0])
-        (when (< y (+ y0 panel-h))
+      (let loop ([y sep-top])
+        (when (<= y sep-bottom)
           (frame-set-string! frame sep-x y "│" border-style)
           (loop (+ y 1))))))
 
   (define list-y0 (+ y0 *forest-search-height*))
-  (define max-text-w (- w 1))
+  (define max-text-w (- list-w 1))
 
   (set! *forest-hit-panel* panel-area)
   (set! *forest-hit-search* search-area)
@@ -1079,7 +1093,7 @@
                 (define avail (max 0 (- max-text-w prefix-w icon-w 1 git-w gap)))
                 (define positions (and (not dir?) (forest-match-positions name *forest-query*)))
                 (when hl?
-                  (frame-set-string! frame x0 y (make-string w #\space) hl-style))
+                  (frame-set-string! frame x0 y (make-string list-w #\space) hl-style))
                 (frame-set-string! frame x0 y own-prefix row-style)
                 (frame-set-string! frame (+ x0 prefix-w) y icon (glyph-style icon-color #:base row-style))
                 (unless dir?
@@ -1120,7 +1134,7 @@
             (define name-x (+ git-x git-w gap))
             (define avail (max 0 (- max-text-w prefix-w icon-w 1 git-w gap)))
             (when hl?
-              (frame-set-string! frame x0 y (make-string w #\space) hl-style))
+              (frame-set-string! frame x0 y (make-string list-w #\space) hl-style))
             (frame-set-string! frame x0 y prefix row-style)
             (frame-set-string! frame (+ x0 prefix-w) y icon (glyph-style icon-color #:base row-style))
             (unless dir?
