@@ -8,9 +8,9 @@
 (define large-file (cadr std::env::args))
 
 (define scan-start (instant/now))
-(define scan (forest-scan-files-bounded tree-root (lambda (_path _name) #t) 20000))
+(define scan (forest-scan-files-bounded tree-root (lambda (_path _name) #t) 5000))
 (define scan-ms (duration->millis (instant/elapsed scan-start)))
-(unless (and (<= (list-ref scan 2) 20000) (list-ref scan 1) (< scan-ms 2000))
+(unless (and (<= (list-ref scan 2) 5000) (list-ref scan 1) (< scan-ms 500))
   (error "large-tree scan exceeded its work contract"))
 
 (define preview-start (instant/now))

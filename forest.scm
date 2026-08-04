@@ -36,66 +36,31 @@
 (define *forest-show-git-ignored* #f)
 (define *forest-git-ignored-set* (hashset))
 
-(define (forest-dotfile? name)
-  (and (> (string-length name) 0) (char=? (string-ref name 0) #\.)))
-
-(define (forest-git-repo? dir)
-  (let ([proc (~> (command "git" (list "-C" dir "rev-parse" "--is-inside-work-tree"))
-                  with-stdout-piped
-                  with-stderr-piped
-                  spawn-process)])
-    (and (Ok? proc)
-         (string=? (trim (read-port-to-string (child-stdout (Ok->value proc)))) "true"))))
-
 (define *forest-git-status-map* (hash))
 
-;; classifies code it modifiles added deleted and renames
-(define (forest-git-status-symbol code)
-  (define x (string-ref code 0))
-  (define y (string-ref code 1))
-  (cond
-    [(and (char=? x #\?) (char=? y #\?)) 'untracked]
-    [(or (char=? x #\A) (char=? y #\A)) 'added]
-    [(or (char=? x #\D) (char=? y #\D)) 'deleted]
-    [(or (char=? x #\R) (char=? y #\R)) 'renamed]
-    [(or (char=? x #\M) (char=? y #\M)) 'modified]
-    [else #f]))
-
-(define (forest-status-path rest)
-  (define parts (split-many rest " -> "))
-  (trim-end-matches (if (> (length parts) 1) (list-ref parts (- (length parts) 1)) rest)
-                     (path-separator)))
-
-(define (forest-parse-git-status-lines lines)
-  (let loop ([ls lines] [ign (hashset)] [statuses (hash)])
-    (if (null? ls)
-        (cons ign statuses)
-        (let ([line (car ls)])
-          (if (< (string-length line) 3)
-              (loop (cdr ls) ign statuses)
-              (let* ([code (substring line 0 2)]
-                     [path (forest-status-path (trim (substring line 3 (string-length line))))])
-                (if (string=? code "!!")
-                    (loop (cdr ls) (hashset-insert ign path) statuses)
-                    (let ([sym (forest-git-status-symbol code)])
-                      (loop (cdr ls) ign (if sym (hash-insert statuses path sym) statuses))))))))))
-
-;; recomputes which workspace-relative paths git considers ignored
-(define (forest-scan-git-ignored! root)
+;; Recomputes ignored and status state from filename-safe porcelain records.
+(define (forest-scan-git-state! root)
   (define parsed
     (with-handler
       (lambda (_) (cons (hashset) (hash)))
-      (if (not (forest-git-repo? root))
-          (cons (hashset) (hash))
-          (let ([proc (~> (command "git" (list "-C" root "status" "--porcelain" "--ignored=matching"))
-                          with-stdout-piped
-                          with-stderr-piped
-                          spawn-process)])
-            (if (Ok? proc)
-                (let* ([output (read-port-to-string (child-stdout (Ok->value proc)))]
-                       [lines (filter (lambda (l) (> (string-length l) 0)) (split-many output "\n"))])
-                  (forest-parse-git-status-lines lines))
-                (cons (hashset) (hash)))))))
+      (let ([proc (~> (command "git" (list "-C" root
+                                           "status"
+                                           "--porcelain=v1"
+                                           "-z"
+                                           "--ignored=matching"
+                                           "--untracked-files=all"))
+                       with-stdout-piped
+                       with-stderr-piped
+                       spawn-process)])
+        (if (Ok? proc)
+            (let* ([child (Ok->value proc)]
+                   [output (read-port-to-string (child-stdout child))]
+                   [_stderr (read-port-to-string (child-stderr child))]
+                   [status (wait child)])
+              (if (and (Ok? status) (= (Ok->value status) 0))
+                  (forest-parse-git-status-z output)
+                  (cons (hashset) (hash))))
+            (cons (hashset) (hash))))))
   (set! *forest-git-ignored-set* (car parsed))
   (set! *forest-git-status-map* (cdr parsed)))
 
@@ -109,6 +74,9 @@
 (define *forest-query* "")
 (define *forest-all-files* '())
 (define *forest-search-results* '())
+(define *forest-search-loaded?* #f)
+(define *forest-search-truncated?* #f)
+(define *forest-search-max-entries* 5000)
 (define *forest-typing?* #f)
 
 (define *forest-default-keybinds*
@@ -376,6 +344,13 @@
 (define (forest-git-status path)
   (hash-try-get *forest-git-status-map* (forest-relpath path)))
 
+(define (forest-visible-path? path)
+  (forest-entry-visible? (file-name path)
+                         *forest-ignore-set*
+                         *forest-show-hidden*
+                         *forest-show-git-ignored*
+                         (forest-git-ignored? path)))
+
 (define (forest-searching?) (not (equal? *forest-query* "")))
 
 ;; dirs before files, alphabetic oder
@@ -393,9 +368,7 @@
   (define result '())
   (define (walk path depth)
     (define name (file-name path))
-    (unless (or (hashset-contains? *forest-ignore-set* name)
-                (and (not *forest-show-hidden*) (forest-dotfile? name))
-                (and (not *forest-show-git-ignored*) (forest-git-ignored? path)))
+    (when (forest-visible-path? path)
       (define indent (forest-repeat-str "  " depth))
       (define marker (if (is-dir? path) (forest-dir-marker path) "  "))
       (set! result (cons (list path indent marker name) result))
@@ -449,25 +422,30 @@
   (unless (forest-searching?)
     (forest-seek-file! path)))
 
-;; flat recursive file list for search
-;; searches files indepedent of the fold state
+;; Flat recursive file list for search, independent of fold state. It is loaded
+;; only when search starts and bounded by directory entries visited.
 (define (forest-scan-files!)
   (define root (helix-find-workspace))
   (define root-prefix (string-append root (path-separator)))
-  (define acc '())
-  (define (walk dir)
-    (for-each
-     (lambda (p)
-       (define name (file-name p))
-       (unless (hashset-contains? *forest-ignore-set* name)
-         (if (is-dir? p)
-             (walk p)
-             (set! acc (cons p acc)))))
-     (with-handler (lambda (_) '()) (read-dir dir))))
-  (walk root)
+  (define scan
+    (forest-scan-files-bounded root
+                               (lambda (path _name) (forest-visible-path? path))
+                               *forest-search-max-entries*))
   (set! *forest-all-files*
-        (sort (map (lambda (p) (substring p (string-length root-prefix) (string-length p))) acc)
-              string<?)))
+        (map (lambda (p) (substring p (string-length root-prefix) (string-length p)))
+             (list-ref scan 0)))
+  (set! *forest-search-truncated?* (list-ref scan 1))
+  (set! *forest-search-loaded?* #t)
+  (when *forest-search-truncated?*
+    (forest-info (string-append "forest: search limited to "
+                                (number->string *forest-search-max-entries*)
+                                " entries"))))
+
+(define (forest-invalidate-search!)
+  (set! *forest-all-files* '())
+  (set! *forest-search-results* '())
+  (set! *forest-search-loaded?* #f)
+  (set! *forest-search-truncated?* #f))
 
 (define (forest-active-count)
   (if (forest-searching?) (length *forest-search-results*) (length *forest-tree*)))
@@ -515,6 +493,7 @@
 (define (forest-enter-search!)
   (set! *forest-typing?* #t)
   (set! *forest-query* "")
+  (unless *forest-search-loaded?* (forest-scan-files!))
   (forest-refresh-search!)
   (set! *forest-cursor* 0)
   (set! *forest-window-start* 0))
@@ -528,8 +507,10 @@
 ;; refreshes the view after an eaction like deletion
 (define (forest-refresh-all!)
   (define old *forest-cursor*)
+  (forest-scan-git-state! (helix-find-workspace))
   (forest-build-tree!)
-  (forest-scan-files!)
+  (forest-invalidate-search!)
+  (when (forest-searching?) (forest-scan-files!))
   (forest-refresh-search!)
   (set! *forest-cursor* (min old (max 0 (- (forest-active-count) 1)))))
 
@@ -1368,11 +1349,10 @@
      (set! *forest-cursor* 0)
      (set! *forest-window-start* 0)
      (set! *forest-query* "")
-     (set! *forest-search-results* '())
+     (forest-invalidate-search!)
      (set! *forest-typing?* #f)
-     (forest-scan-git-ignored! (helix-find-workspace))
+     (forest-scan-git-state! (helix-find-workspace))
      (forest-reveal-current-file!)
-     (forest-scan-files!)
      (push-component! (forest-make-bg-component))
      (push-component! (forest-make-fg-component))]
 
@@ -1381,7 +1361,7 @@
 
     [else
      (set! *forest-focused* #t)
-     (forest-scan-git-ignored! (helix-find-workspace))
+     (forest-scan-git-state! (helix-find-workspace))
      (forest-reveal-current-file!)
      (push-component! (forest-make-fg-component))]))
 
@@ -1398,11 +1378,7 @@
 
 (define (forest-mini-list-dir path)
   (define children
-    (filter (lambda (p)
-              (define name (file-name p))
-              (not (or (hashset-contains? *forest-ignore-set* name)
-                       (and (not *forest-show-hidden*) (forest-dotfile? name))
-                       (and (not *forest-show-git-ignored*) (forest-git-ignored? p)))))
+    (filter (lambda (p) (forest-visible-path? p))
             (with-handler (lambda (_) '()) (read-dir path))))
   (map (lambda (p) (cons p (file-name p))) (forest-sort-entries children)))
 
@@ -1475,6 +1451,10 @@
                (ForestMiniColumn (ForestMiniColumn-path col) new-entries (box new-cursor)))
              *forest-mini-stack*)))
 
+(define (forest-mini-refresh!)
+  (forest-scan-git-state! (helix-find-workspace))
+  (forest-mini-refresh-all!))
+
 (set! *forest-refresh-mini-fn* forest-mini-refresh-all!)
 
 (define (forest-mini-index-of lst target)
@@ -1513,19 +1493,6 @@
       (forest-mini-build-stack-for root path)
       (list (ForestMiniColumn root (forest-mini-list-dir root) (box 0)))))
 
-;; flat recursive file list for search, independent of the cascaded columns
-(define (forest-mini-scan-files root)
-  (define prefix (string-append root (path-separator)))
-  (define acc '())
-  (define (walk dir)
-    (for-each
-     (lambda (p)
-       (unless (hashset-contains? *forest-ignore-set* (file-name p))
-         (if (is-dir? p) (walk p) (set! acc (cons p acc)))))
-     (with-handler (lambda (_) '()) (read-dir dir))))
-  (walk root)
-  (sort (map (lambda (p) (substring p (string-length prefix) (string-length p))) acc) string<?))
-
 ;; panels grow and shrink with their own content with safe bound clamping
 (define (forest-mini-longest-name entries)
   (let loop ([lst entries] [best 0])
@@ -1561,16 +1528,12 @@
       (forest-mini-window-start cursor count height)))
 
 (define *forest-mini-preview-max-lines* 200)
+(define *forest-mini-preview-max-bytes* 65536)
 (define *forest-mini-preview-min-w* 15)
 (define *forest-mini-preview-max-w* 70)
 
 (define (forest-mini-preview-lines path max-lines)
-  (with-handler
-    (lambda (_) (list "(unable to preview)"))
-    (let* ([p (open-input-file path)]
-           [content (read-port-to-string p)])
-      (close-input-port p)
-      (forest-take (split-many content "\n") max-lines))))
+  (list-ref (forest-read-preview path max-lines *forest-mini-preview-max-bytes*) 0))
 
 (define (forest-mini-longest-line lines cap)
   (let loop ([lst lines] [best 0])
@@ -1606,7 +1569,7 @@
                   (forest-run-touch! full)
                   (helix.open full)))
             (forest-info (string-append "created " name))))
-        (enqueue-thread-local-callback forest-mini-refresh-active!))))))
+        (enqueue-thread-local-callback forest-mini-refresh!))))))
 
 (define (forest-mini-prompt-rename!)
   (define entry (forest-mini-current-entry))
@@ -1627,7 +1590,7 @@
                 (define target (forest-confined-rename-path (helix-find-workspace) path new-name))
                 (forest-run-mv! path target)
                 (forest-info (string-append "renamed " name " -> " new-name))))
-            (enqueue-thread-local-callback forest-mini-refresh-active!))))))))
+            (enqueue-thread-local-callback forest-mini-refresh!))))))))
 
 (define (forest-mini-prompt-delete!)
   (define entry (forest-mini-current-entry))
@@ -1650,7 +1613,7 @@
                     (delete-directory! path) ; only works if empty
                     (delete-file! path))
                 (forest-info (string-append "deleted " name))))
-            (enqueue-thread-local-callback forest-mini-refresh-active!))))))))
+            (enqueue-thread-local-callback forest-mini-refresh!))))))))
 
 ;; searches the whole workspace and re-cascades the stack to the match
 (define (forest-mini-prompt-search!)
@@ -1663,7 +1626,8 @@
       ""
       (lambda (query)
         (unless (equal? query "")
-          (define matches (fuzzy-match query (forest-mini-scan-files root)))
+          (forest-scan-files!)
+          (define matches (fuzzy-match query *forest-all-files*))
           (if (null? matches)
               (forest-error (string-append "no matches for '" query "'"))
               (set! *forest-mini-stack*
@@ -1935,7 +1899,7 @@
     [(equal? action 'create) (forest-mini-prompt-create!) event-result/consume]
     [(equal? action 'rename) (forest-mini-prompt-rename!) event-result/consume]
     [(equal? action 'delete) (forest-mini-prompt-delete!) event-result/consume]
-    [(equal? action 'refresh) (forest-mini-refresh-active!) event-result/consume]
+    [(equal? action 'refresh) (forest-mini-refresh!) event-result/consume]
     [(equal? action 'search) (forest-mini-prompt-search!) event-result/consume]
     [(equal? action 'toggle-hidden) (forest-toggle-hidden!) event-result/consume]
     [(equal? action 'toggle-git-ignored) (forest-toggle-git-ignored!) event-result/consume]
@@ -1979,7 +1943,7 @@
 (define (forest-mini-open!)
   (cond
     [(not *forest-active*)
-     (forest-scan-git-ignored! (helix-find-workspace))
+     (forest-scan-git-state! (helix-find-workspace))
      (set! *forest-mini-stack* (forest-mini-reveal-current-file!))
      (set! *forest-active* #t)
      (push-component! (forest-mini-make-component))]
