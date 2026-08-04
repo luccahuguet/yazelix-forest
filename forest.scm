@@ -189,9 +189,6 @@
   (forest-resolve-reserved!)
   (if *forest-reserved-bottom-fn* (with-handler (lambda (_) 0) (*forest-reserved-bottom-fn*)) 0))
 
-(define (forest-take lst n)
-  (if (or (null? lst) (<= n 0)) '() (cons (car lst) (forest-take (cdr lst) (- n 1)))))
-
 (define (forest-drop lst n)
   (if (or (null? lst) (<= n 0)) lst (forest-drop (cdr lst) (- n 1))))
 
@@ -352,7 +349,7 @@
 
 (define (forest-searching?) (not (equal? *forest-query* "")))
 
-;; dirs before files, alphabetic oder
+;; dirs before files, alphabetic order
 (define (forest-sort-entries lst)
   (define dirs (sort (filter is-dir? lst) string<?))
   (define files (sort (filter (lambda (p) (not (is-dir? p))) lst) string<?))
@@ -380,13 +377,6 @@
   (walk (helix-find-workspace) 0)
   (set! *forest-tree* (reverse result)))
 
-(define (forest-parent-path path)
-  (trim-end-matches path (string-append (path-separator) (file-name path))))
-
-(define (forest-half-floor n)
-  (let loop ([n n] [h 0])
-    (if (< n 2) h (loop (- n 2) (+ h 1)))))
-
 ;; marks every old dir between the workspace root and path as open
 (define (forest-open-ancestors-for-file! path)
   (define ws (helix-find-workspace))
@@ -395,7 +385,7 @@
              (>= (string-length path) (string-length ws-prefix))
              (equal? (substring path 0 (string-length ws-prefix)) ws-prefix))
     (define (open-up! p)
-      (define parent (forest-parent-path p))
+      (define parent (parent-name p))
       (set! *forest-directories* (hash-insert *forest-directories* parent #f))
       (unless (equal? parent ws)
         (open-up! parent)))
@@ -412,7 +402,7 @@
     (when idx
       (set! *forest-cursor* idx)
       (set! *forest-window-start*
-            (max 0 (- idx (forest-half-floor *forest-visible-height*)))))))
+            (max 0 (- idx (quotient *forest-visible-height* 2)))))))
 
 (define (forest-reveal-current-file!)
   (define path (editor-document->path (editor->doc-id (editor-focus))))
@@ -503,7 +493,7 @@
   (set! *forest-cursor* 0)
   (set! *forest-window-start* 0))
 
-;; refreshes the view after an eaction like deletion
+;; refreshes the view after an action like deletion
 (define (forest-refresh-all!)
   (define old *forest-cursor*)
   (forest-scan-git-state! (helix-find-workspace))
@@ -515,7 +505,7 @@
 
 (define *forest-refresh-mini-fn* #f)
 
-;; refreshes whichever style is active immediatelly
+;; refreshes whichever style is active immediately
 (define (forest-refresh-current-style!)
   (if (and (equal? *forest-style* 'mini) *forest-refresh-mini-fn*)
       (*forest-refresh-mini-fn*)
@@ -694,7 +684,7 @@
           (begin
             (define target (forest-confined-create-path (helix-find-workspace) name))
             (define full (car target))
-            (forest-run-command! "mkdir" (list "-p" (forest-parent-path full)))
+            (forest-run-command! "mkdir" (list "-p" (parent-name full)))
             (if (cdr target)
                 (forest-run-command! "mkdir" (list full))
                 (begin
@@ -718,8 +708,7 @@
             (lambda (err) (forest-error (string-append "rename failed: " (error-object-message err))))
             (begin
               (define target (forest-confined-rename-path (helix-find-workspace) path new-name))
-              (forest-run-command! "mv" (list "-n" path target))
-              (when (path-exists? path) (error "target already exists"))
+              (rename-file-or-directory! path target)
               (forest-info (string-append "renamed " name " -> " new-name))
               (enqueue-thread-local-callback refresh!)))))))))
 
@@ -738,7 +727,7 @@
           (with-handler
             (lambda (err) (forest-error (string-append "delete failed: " (error-object-message err))))
             (begin
-              (if (is-dir? path)
+              (if (and (is-dir? path) (not (forest-path-entry-symlink? path)))
                   (forest-run-command! "rmdir" (list path))
                   (delete-file! path))
               (forest-info (string-append "deleted " name))
@@ -751,7 +740,7 @@
     (forest-prompt-create-at!
      (if (is-dir? path)
          (string-append path (path-separator))
-         (trim-end-matches path (file-name path)))
+         (string-append (parent-name path) (path-separator)))
      forest-refresh-all!)))
 
 (define (forest-prompt-rename!)
@@ -1083,8 +1072,8 @@
                  [total-rows (length rows)]
                  [window-start (max 0 (min (max 0 (- total-rows *forest-visible-height*))
                                             (or *forest-click-window*
-                                                (max 0 (- selected-row (forest-half-floor *forest-visible-height*))))))]
-                 [visible (forest-take (forest-drop rows window-start) *forest-visible-height*)])
+                                                (max 0 (- selected-row (quotient *forest-visible-height* 2))))))]
+                 [visible (take (forest-drop rows window-start) *forest-visible-height*)])
             ;; headings aren't selectable, so they record #f and a click does nothing
             (set! *forest-hit-window* window-start)
             (set! *forest-hit-rows*
@@ -1123,8 +1112,8 @@
                     (forest-render-name-hl frame name-x y name avail row-style (forest-match-style row-style) positions)
                     (frame-set-string! frame name-x y (forest-truncate name avail) row-style))
                 (loop (cdr items) (+ row 1))))))
-      (let ([visible (forest-take (forest-drop *forest-tree* *forest-window-start*)
-                                   *forest-visible-height*)])
+      (let ([visible (take (forest-drop *forest-tree* *forest-window-start*)
+                            *forest-visible-height*)])
         (set! *forest-hit-rows*
               (let loop ([items visible] [i *forest-window-start*])
                 (if (null? items) '() (cons i (loop (cdr items) (+ i 1))))))
@@ -1576,7 +1565,7 @@
                                text-style hl-style dir-style dim-style)
   (if (null? entries)
       (frame-set-string! frame x y0 (forest-truncate "(empty)" w) dim-style)
-      (let iloop ([items (forest-take (forest-drop entries ws) h)] [row 0])
+      (let iloop ([items (take (forest-drop entries ws) h)] [row 0])
         (unless (or (null? items) (>= row h))
           (define e (car items))
           (define idx (+ ws row))
@@ -1606,7 +1595,7 @@
 
 ;; file-preview panel in plain text
 (define (forest-mini-render-lines frame x y0 w h lines style)
-  (let iloop ([items (forest-take lines h)] [row 0])
+  (let iloop ([items (take lines h)] [row 0])
     (unless (or (null? items) (>= row h))
       (frame-set-string! frame x (+ y0 row) (forest-truncate (car items) w) style)
       (iloop (cdr items) (+ row 1)))))
@@ -1669,7 +1658,7 @@
        [else
         ;; clicking an ancestor drops the cascade off it, as h repeatedly would
         (when (and idx (not active?))
-          (set! *forest-mini-stack* (forest-take *forest-mini-stack* (+ idx 1))))
+          (set! *forest-mini-stack* (take *forest-mini-stack* (+ idx 1))))
         (forest-mini-set-cursor! col entry-idx)
         (forest-arm-click! slot)
         (set! *forest-mini-click-window* (list col ws))

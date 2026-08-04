@@ -46,9 +46,6 @@
 (define (write-text! path content)
   (call-with-output-file path (lambda (port) (write-string content port))))
 
-(define (read-text path)
-  (call-with-input-file path (lambda (port) (read-port-to-string port))))
-
 (define (write-binary! path)
   (call-with-output-file path (lambda (port) (write-bytes (bytes 0 1 2 3) port))))
 
@@ -76,7 +73,8 @@
 (check! "output-file creation refuses an existing target"
         (raises? (lambda () (call-with-output-file exclusive-target (lambda (_) void)))))
 (check-equal! "exclusive creation preserves existing content"
-              (read-text exclusive-target) "preserve")
+              (call-with-input-file exclusive-target (lambda (port) (read-port-to-string port)))
+              "preserve")
 (check! "create rejects NUL"
         (raises? (lambda ()
                    (forest-confined-create-path
@@ -100,13 +98,40 @@
 (check-equal! "rename permits zero digits"
               (forest-confined-rename-path workspace source "new-01.txt")
               (string-append (canonicalize-path workspace) (path-separator) "sub/new-01.txt"))
-(define no-clobber-source (string-append workspace (path-separator) "sub/move-source.txt"))
-(define no-clobber-target (string-append workspace (path-separator) "sub/move-target.txt"))
-(write-text! no-clobber-source "source")
-(write-text! no-clobber-target "target")
-(run! "mv" (list "-n" no-clobber-source no-clobber-target))
-(check! "no-clobber move retains its source" (path-exists? no-clobber-source))
-(check-equal! "no-clobber move preserves its target" (read-text no-clobber-target) "target")
+(define repeated-parent
+  (string-append workspace (path-separator) "same" (path-separator) "same"))
+(check-equal! "native parent keeps repeated component"
+              (parent-name repeated-parent)
+              (string-append workspace (path-separator) "same"))
+
+;; The native rename primitive treats its destination as the exact entry. It
+;; neither moves a source inside a real directory nor follows a directory link.
+(define directory-source (string-append workspace (path-separator) "sub/directory-source.txt"))
+(define directory-target (string-append workspace (path-separator) "sub/directory-target"))
+(write-text! directory-source "source")
+(mkdir! directory-target)
+(check! "exact rename rejects a directory destination"
+        (raises? (lambda () (rename-file-or-directory! directory-source directory-target))))
+(check! "failed exact rename retains its source" (path-exists? directory-source))
+(check-equal! "exact rename does not move inside a directory"
+              (path-exists? (string-append directory-target (path-separator) "directory-source.txt"))
+              #f)
+
+(define link-source (string-append workspace (path-separator) "sub/link-source.txt"))
+(define link-target (string-append workspace (path-separator) "sub/link-target"))
+(write-text! link-source "source")
+(run! "ln" (list "-s" outside link-target))
+(check! "directory link is classified as a link" (forest-path-entry-symlink? link-target))
+(rename-file-or-directory! link-source link-target)
+(check-equal! "exact rename does not follow a directory link"
+              (path-exists? (string-append outside (path-separator) "link-source.txt"))
+              #f)
+(check-equal! "exact rename replaces the destination link"
+              (call-with-input-file link-target (lambda (port) (read-port-to-string port)))
+              "source")
+(check-equal! "renamed destination is no longer a link"
+              (forest-path-entry-symlink? link-target)
+              #f)
 (for-each
  (lambda (name)
    (check! (string-append "reject rename " name)

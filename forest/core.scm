@@ -4,14 +4,10 @@
          forest-confined-rename-path
          forest-entry-visible?
          forest-git-status-symbol
+         forest-path-entry-symlink?
          forest-parse-git-status-z
          forest-read-preview
          forest-scan-files-bounded)
-
-(define (forest-take-core lst n)
-  (if (or (null? lst) (<= n 0))
-      '()
-      (cons (car lst) (forest-take-core (cdr lst) (- n 1)))))
 
 (define (forest-string-has-char? value ch)
   (not (not (member ch (string->list value)))))
@@ -247,7 +243,7 @@
                       (let* ([all-lines (split-many content "\n")]
                              [line-truncated? (> (length all-lines) max-lines)]
                              [byte-truncated? (> bytes-read max-bytes)])
-                        (list (forest-take-core all-lines max-lines)
+                        (list (take all-lines max-lines)
                               (or line-truncated? byte-truncated?)
                               'text
                               bytes-read))))))))))

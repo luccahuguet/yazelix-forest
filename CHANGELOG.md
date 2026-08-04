@@ -2,8 +2,9 @@
 
 ## 0.2.0
 
-- Confine create and rename targets to the workspace and selected parent, including symlink-ancestor checks and no-clobber final mutations.
-- Refuse to delete non-empty directories instead of recursively removing their contents.
+- Confine create and rename targets to the workspace and selected parent, including symlink-ancestor checks, exclusive file creation, and exact-destination rename semantics.
+- Refuse to delete non-empty directories instead of recursively removing their contents, while deleting directory symlinks without touching their targets.
+- Resolve repeated path components through native parent semantics so current-file reveal and nested creation remain correct.
 - Parse Git status and ignored entries through NUL-delimited porcelain records and refresh state after explicit refreshes and mutations.
 - Share hidden, ignored, and Git-ignored visibility semantics across both trees and searches.
 - Load search inventories on demand with a 5,000-entry work budget so live fuzzy matching remains responsive.
