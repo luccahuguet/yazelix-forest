@@ -6,6 +6,7 @@
 (require (prefix-in helix. "helix/commands.scm"))
 (require "notify/notify.scm")
 (require "glyph/glyph.scm")
+(require "forest/core.scm")
 
 (define (forest-info msg)
   (notify msg #:title "forest.hx"))
@@ -689,39 +690,25 @@
                    (hash "handle_event" forest-modal-handle-event
                          "cursor" forest-modal-cursor-fn))))
 
-;; shells out to mv mkdir since steel has no rename builtin
+;; Shells out for the few filesystem mutations Steel does not expose directly.
+(define (forest-run-command! program args)
+  (define proc (~> (command program args) with-stderr-piped spawn-process))
+  (unless (Ok? proc)
+    (error (string-append program ": could not spawn process")))
+  (define child (Ok->value proc))
+  (define stderr (trim (read-port-to-string (child-stderr child))))
+  (define status (wait child))
+  (unless (and (Ok? status) (= (Ok->value status) 0))
+    (error (if (string=? stderr "") (string-append program " failed") stderr))))
+
 (define (forest-run-mv! from-path to-path)
-  (let ([proc (~> (command "mv" (list from-path to-path))
-                  with-stdout-piped
-                  with-stderr-piped
-                  spawn-process)])
-    (if (Ok? proc)
-        (let ([stderr (read-port-to-string (child-stderr (Ok->value proc)))])
-          (when (not (string=? (trim stderr) ""))
-            (error (trim stderr))))
-        (error "mv: could not spawn process"))))
+  (forest-run-command! "mv" (list from-path to-path)))
 
 (define (forest-run-mkdir-p! path)
-  (let ([proc (~> (command "mkdir" (list "-p" path))
-                  with-stdout-piped
-                  with-stderr-piped
-                  spawn-process)])
-    (if (Ok? proc)
-        (let ([stderr (read-port-to-string (child-stderr (Ok->value proc)))])
-          (when (not (string=? (trim stderr) ""))
-            (error (trim stderr))))
-        (error "mkdir: could not spawn process"))))
+  (forest-run-command! "mkdir" (list "-p" path)))
 
 (define (forest-run-touch! path)
-  (let ([proc (~> (command "touch" (list path))
-                  with-stdout-piped
-                  with-stderr-piped
-                  spawn-process)])
-    (if (Ok? proc)
-        (let ([stderr (read-port-to-string (child-stderr (Ok->value proc)))])
-          (when (not (string=? (trim stderr) ""))
-            (error (trim stderr))))
-        (error "touch: could not spawn process"))))
+  (forest-run-command! "touch" (list path)))
 
 (define (forest-prompt-create!)
   (define entry (forest-current-entry))
@@ -737,11 +724,12 @@
         (string-append "New (end with " (path-separator) " for dir): ")
         (forest-relpath base)
         (lambda (name)
-          (define full (string-append (helix-find-workspace) (path-separator) name))
           (with-handler
             (lambda (err) (forest-error (string-append "create failed: " (error-object-message err))))
             (begin
-              (if (ends-with? name (path-separator))
+              (define target (forest-confined-create-path (helix-find-workspace) name))
+              (define full (car target))
+              (if (cdr target)
                   (forest-run-mkdir-p! full)
                   (begin
                     (forest-run-mkdir-p! (forest-parent-path full))
@@ -755,7 +743,6 @@
   (when entry
     (define path (car entry))
     (define name (file-name path))
-    (define dir (trim-end-matches path (string-append (path-separator) name)))
     (enqueue-thread-local-callback
      (lambda ()
        (forest-show-modal!
@@ -767,7 +754,8 @@
             (with-handler
               (lambda (err) (forest-error (string-append "rename failed: " (error-object-message err))))
               (begin
-                (forest-run-mv! path (string-append dir (path-separator) new-name))
+                (define target (forest-confined-rename-path (helix-find-workspace) path new-name))
+                (forest-run-mv! path target)
                 (forest-info (string-append "renamed " name " -> " new-name))))
             (enqueue-thread-local-callback forest-refresh-all!))))))))
 
@@ -1606,11 +1594,12 @@
       (string-append "New (end with " (path-separator) " for dir): ")
       (forest-relpath base)
       (lambda (name)
-        (define full (string-append (helix-find-workspace) (path-separator) name))
         (with-handler
           (lambda (err) (forest-error (string-append "create failed: " (error-object-message err))))
           (begin
-            (if (ends-with? name (path-separator))
+            (define target (forest-confined-create-path (helix-find-workspace) name))
+            (define full (car target))
+            (if (cdr target)
                 (forest-run-mkdir-p! full)
                 (begin
                   (forest-run-mkdir-p! (forest-parent-path full))
@@ -1624,7 +1613,6 @@
   (when entry
     (define path (car entry))
     (define name (file-name path))
-    (define dir (trim-end-matches path (string-append (path-separator) name)))
     (enqueue-thread-local-callback
      (lambda ()
        (forest-show-modal!
@@ -1636,7 +1624,8 @@
             (with-handler
               (lambda (err) (forest-error (string-append "rename failed: " (error-object-message err))))
               (begin
-                (forest-run-mv! path (string-append dir (path-separator) new-name))
+                (define target (forest-confined-rename-path (helix-find-workspace) path new-name))
+                (forest-run-mv! path target)
                 (forest-info (string-append "renamed " name " -> " new-name))))
             (enqueue-thread-local-callback forest-mini-refresh-active!))))))))
 
