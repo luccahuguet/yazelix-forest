@@ -26,8 +26,10 @@
        (not (string=? component ".."))))
 
 (define (forest-drive-absolute? path)
-  (and (> (string-length path) 1)
-       (char=? (string-ref path 1) #\:)))
+  (and (> (string-length path) 2)
+       (char=? (string-ref path 1) #\:)
+       (or (char=? (string-ref path 2) #\/)
+           (char=? (string-ref path 2) #\\))))
 
 (define (forest-relative-path-components input allow-separators?)
   (when (or (not (string? input))

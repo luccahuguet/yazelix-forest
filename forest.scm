@@ -50,12 +50,11 @@
                                            "--ignored=matching"
                                            "--untracked-files=all"))
                        with-stdout-piped
-                       with-stderr-piped
+                       (with-stderr (open-output-file "/dev/null" #:exists 'append))
                        spawn-process)])
         (if (Ok? proc)
             (let* ([child (Ok->value proc)]
                    [output (read-port-to-string (child-stdout child))]
-                   [_stderr (read-port-to-string (child-stderr child))]
                    [status (wait child)])
               (if (and (Ok? status) (= (Ok->value status) 0))
                   (forest-parse-git-status-z output)
@@ -671,7 +670,7 @@
                    (hash "handle_event" forest-modal-handle-event
                          "cursor" forest-modal-cursor-fn))))
 
-;; Shells out for the few filesystem mutations Steel does not expose directly.
+;; Runs POSIX mutations while retaining their failure output for notifications.
 (define (forest-run-command! program args)
   (define proc (~> (command program args) with-stderr-piped spawn-process))
   (unless (Ok? proc)
@@ -682,86 +681,85 @@
   (unless (and (Ok? status) (= (Ok->value status) 0))
     (error (if (string=? stderr "") (string-append program " failed") stderr))))
 
-(define (forest-run-mv! from-path to-path)
-  (forest-run-command! "mv" (list from-path to-path)))
+(define (forest-prompt-create-at! base refresh!)
+  (enqueue-thread-local-callback
+   (lambda ()
+     (forest-show-modal!
+      'input
+      (string-append "New (end with " (path-separator) " for dir): ")
+      (forest-relpath base)
+      (lambda (name)
+        (with-handler
+          (lambda (err) (forest-error (string-append "create failed: " (error-object-message err))))
+          (begin
+            (define target (forest-confined-create-path (helix-find-workspace) name))
+            (define full (car target))
+            (if (cdr target)
+                (forest-run-command! "mkdir" (list "-p" full))
+                (begin
+                  (forest-run-command! "mkdir" (list "-p" (forest-parent-path full)))
+                  (forest-run-command! "touch" (list full))
+                  (helix.open full)))
+            (forest-info (string-append "created " name))
+            (enqueue-thread-local-callback refresh!))))))))
 
-(define (forest-run-mkdir-p! path)
-  (forest-run-command! "mkdir" (list "-p" path)))
+(define (forest-prompt-rename-entry! entry refresh!)
+  (define path (car entry))
+  (define name (file-name path))
+  (enqueue-thread-local-callback
+   (lambda ()
+     (forest-show-modal!
+      'input
+      "Rename: "
+      name
+      (lambda (new-name)
+        (when (and (not (equal? new-name "")) (not (equal? new-name name)))
+          (with-handler
+            (lambda (err) (forest-error (string-append "rename failed: " (error-object-message err))))
+            (begin
+              (define target (forest-confined-rename-path (helix-find-workspace) path new-name))
+              (forest-run-command! "mv" (list path target))
+              (forest-info (string-append "renamed " name " -> " new-name))
+              (enqueue-thread-local-callback refresh!)))))))))
 
-(define (forest-run-touch! path)
-  (forest-run-command! "touch" (list path)))
+(define (forest-prompt-delete-entry! entry refresh!)
+  (define path (car entry))
+  (define name (file-name path))
+  (define kind (if (is-dir? path) "directory" "file"))
+  (enqueue-thread-local-callback
+   (lambda ()
+     (forest-show-modal!
+      'confirm
+      (string-append "Delete " kind " '" name "'? (y/N) ")
+      ""
+      (lambda (confirmed?)
+        (when confirmed?
+          (with-handler
+            (lambda (err) (forest-error (string-append "delete failed: " (error-object-message err))))
+            (begin
+              (if (is-dir? path)
+                  (forest-run-command! "rmdir" (list path))
+                  (delete-file! path))
+              (forest-info (string-append "deleted " name))
+              (enqueue-thread-local-callback refresh!)))))))))
 
 (define (forest-prompt-create!)
   (define entry (forest-current-entry))
   (when entry
     (define path (car entry))
-    (define base (if (is-dir? path)
-                      (string-append path (path-separator))
-                      (trim-end-matches path (file-name path))))
-    (enqueue-thread-local-callback
-     (lambda ()
-       (forest-show-modal!
-        'input
-        (string-append "New (end with " (path-separator) " for dir): ")
-        (forest-relpath base)
-        (lambda (name)
-          (with-handler
-            (lambda (err) (forest-error (string-append "create failed: " (error-object-message err))))
-            (begin
-              (define target (forest-confined-create-path (helix-find-workspace) name))
-              (define full (car target))
-              (if (cdr target)
-                  (forest-run-mkdir-p! full)
-                  (begin
-                    (forest-run-mkdir-p! (forest-parent-path full))
-                    (forest-run-touch! full)
-                    (helix.open full)))
-              (forest-info (string-append "created " name))))
-          (enqueue-thread-local-callback forest-refresh-all!)))))))
+    (forest-prompt-create-at!
+     (if (is-dir? path)
+         (string-append path (path-separator))
+         (trim-end-matches path (file-name path)))
+     forest-refresh-all!)))
 
 (define (forest-prompt-rename!)
   (define entry (forest-current-entry))
-  (when entry
-    (define path (car entry))
-    (define name (file-name path))
-    (enqueue-thread-local-callback
-     (lambda ()
-       (forest-show-modal!
-        'input
-        "Rename: "
-        name
-        (lambda (new-name)
-          (when (and (not (equal? new-name "")) (not (equal? new-name name)))
-            (with-handler
-              (lambda (err) (forest-error (string-append "rename failed: " (error-object-message err))))
-              (begin
-                (define target (forest-confined-rename-path (helix-find-workspace) path new-name))
-                (forest-run-mv! path target)
-                (forest-info (string-append "renamed " name " -> " new-name))))
-            (enqueue-thread-local-callback forest-refresh-all!))))))))
+  (when entry (forest-prompt-rename-entry! entry forest-refresh-all!)))
 
 (define (forest-prompt-delete!)
   (define entry (forest-current-entry))
-  (when entry
-    (define path (car entry))
-    (define name (file-name path))
-    (define kind (if (is-dir? path) "directory" "file"))
-    (enqueue-thread-local-callback
-     (lambda ()
-       (forest-show-modal!
-        'confirm
-        (string-append "Delete " kind " '" name "'? (y/N) ")
-        ""
-        (lambda (confirmed?)
-          (when confirmed?
-            (with-handler
-              (lambda (err) (forest-error (string-append "delete failed: " (error-object-message err))))
-              (begin
-                (if (is-dir? path)
-                    (delete-directory! path) ; only works if empty
-                    (delete-file! path))
-                (forest-info (string-append "deleted " name))))
-            (enqueue-thread-local-callback forest-refresh-all!))))))))
+  (when entry (forest-prompt-delete-entry! entry forest-refresh-all!)))
 
 (struct ForestBgState ())
 
@@ -1432,17 +1430,7 @@
   (when (> (length *forest-mini-stack*) 1)
     (set! *forest-mini-stack* (forest-mini-drop-last *forest-mini-stack*))))
 
-;; rebuilds the active column in place after a create/rename/delete
-;; keeping the cursor in bounds
-(define (forest-mini-refresh-active!)
-  (define col (forest-mini-active-column))
-  (define new-entries (forest-mini-list-dir (ForestMiniColumn-path col)))
-  (define new-cursor (max 0 (min (forest-mini-cursor col) (- (length new-entries) 1))))
-  (set! *forest-mini-stack*
-        (append (forest-mini-drop-last *forest-mini-stack*)
-                (list (ForestMiniColumn (ForestMiniColumn-path col) new-entries (box new-cursor))))))
-
-;; refesh after toggle
+;; refreshes every column after a visibility toggle
 (define (forest-mini-refresh-all!)
   (set! *forest-mini-stack*
         (map (lambda (col)
@@ -1532,9 +1520,6 @@
 (define *forest-mini-preview-min-w* 15)
 (define *forest-mini-preview-max-w* 70)
 
-(define (forest-mini-preview-lines path max-lines)
-  (list-ref (forest-read-preview path max-lines *forest-mini-preview-max-bytes*) 0))
-
 (define (forest-mini-longest-line lines cap)
   (let loop ([lst lines] [best 0])
     (if (null? lst) best (loop (cdr lst) (max best (min cap (string-length (car lst))))))))
@@ -1544,76 +1529,27 @@
   (cond
     [(not entry) (list 'empty #f)]
     [(is-dir? (car entry)) (list 'dir (forest-mini-list-dir (car entry)))]
-    [(is-file? (car entry)) (list 'file (forest-mini-preview-lines (car entry) *forest-mini-preview-max-lines*))]
+    [(is-file? (car entry))
+     (list 'file
+           (list-ref (forest-read-preview (car entry)
+                                          *forest-mini-preview-max-lines*
+                                          *forest-mini-preview-max-bytes*)
+                     0))]
     [else (list 'empty #f)]))
 
 (define (forest-mini-prompt-create!)
   (define col (forest-mini-active-column))
-  (define base (string-append (ForestMiniColumn-path col) (path-separator)))
-  (enqueue-thread-local-callback
-   (lambda ()
-     (forest-show-modal!
-      'input
-      (string-append "New (end with " (path-separator) " for dir): ")
-      (forest-relpath base)
-      (lambda (name)
-        (with-handler
-          (lambda (err) (forest-error (string-append "create failed: " (error-object-message err))))
-          (begin
-            (define target (forest-confined-create-path (helix-find-workspace) name))
-            (define full (car target))
-            (if (cdr target)
-                (forest-run-mkdir-p! full)
-                (begin
-                  (forest-run-mkdir-p! (forest-parent-path full))
-                  (forest-run-touch! full)
-                  (helix.open full)))
-            (forest-info (string-append "created " name))))
-        (enqueue-thread-local-callback forest-mini-refresh!))))))
+  (forest-prompt-create-at!
+   (string-append (ForestMiniColumn-path col) (path-separator))
+   forest-mini-refresh!))
 
 (define (forest-mini-prompt-rename!)
   (define entry (forest-mini-current-entry))
-  (when entry
-    (define path (car entry))
-    (define name (file-name path))
-    (enqueue-thread-local-callback
-     (lambda ()
-       (forest-show-modal!
-        'input
-        "Rename: "
-        name
-        (lambda (new-name)
-          (when (and (not (equal? new-name "")) (not (equal? new-name name)))
-            (with-handler
-              (lambda (err) (forest-error (string-append "rename failed: " (error-object-message err))))
-              (begin
-                (define target (forest-confined-rename-path (helix-find-workspace) path new-name))
-                (forest-run-mv! path target)
-                (forest-info (string-append "renamed " name " -> " new-name))))
-            (enqueue-thread-local-callback forest-mini-refresh!))))))))
+  (when entry (forest-prompt-rename-entry! entry forest-mini-refresh!)))
 
 (define (forest-mini-prompt-delete!)
   (define entry (forest-mini-current-entry))
-  (when entry
-    (define path (car entry))
-    (define name (file-name path))
-    (define kind (if (is-dir? path) "directory" "file"))
-    (enqueue-thread-local-callback
-     (lambda ()
-       (forest-show-modal!
-        'confirm
-        (string-append "Delete " kind " '" name "'? (y/N) ")
-        ""
-        (lambda (confirmed?)
-          (when confirmed?
-            (with-handler
-              (lambda (err) (forest-error (string-append "delete failed: " (error-object-message err))))
-              (begin
-                (if (is-dir? path)
-                    (delete-directory! path) ; only works if empty
-                    (delete-file! path))
-                (forest-info (string-append "deleted " name))))
-            (enqueue-thread-local-callback forest-mini-refresh!))))))))
+  (when entry (forest-prompt-delete-entry! entry forest-mini-refresh!)))
 
 ;; searches the whole workspace and re-cascades the stack to the match
 (define (forest-mini-prompt-search!)

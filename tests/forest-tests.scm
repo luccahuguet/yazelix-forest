@@ -65,6 +65,9 @@
 (check-equal! "create permits zero digits"
               (car (forest-confined-create-path workspace "sub/file-01.txt"))
               (string-append (canonicalize-path workspace) (path-separator) "sub/file-01.txt"))
+(check-equal! "create permits Unix colon names"
+              (car (forest-confined-create-path workspace "sub/a:b.txt"))
+              (string-append (canonicalize-path workspace) (path-separator) "sub/a:b.txt"))
 (check! "create rejects NUL"
         (raises? (lambda ()
                    (forest-confined-create-path
@@ -74,7 +77,7 @@
  (lambda (name)
    (check! (string-append "reject create " name)
            (raises? (lambda () (forest-confined-create-path workspace name)))))
- (list "" "." ".." "../outside" "/tmp/outside" "sub//file" "sub/./file" "sub/../file"
+ (list "" "." ".." "../outside" "/tmp/outside" "C:/tmp/outside" "sub//file" "sub/./file" "sub/../file"
        "sub\\file" "escape/pwned"))
 
 (define source (string-append workspace (path-separator) "sub" (path-separator) "old.txt"))

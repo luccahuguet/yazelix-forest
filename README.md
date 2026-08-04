@@ -123,6 +123,7 @@ Opening the tree reveals whatever file is currently open in the editor, cascadin
 - Mouse support needs Helix's own `editor.mouse` left on (it is by default).
 - Two clicks on an entry activate it. They needn't be quick, but a keypress in between cancels.
 - Create paths stay within the canonical workspace, and rename accepts one basename in the selected entry's parent. Traversal, absolute paths, alternate separators, existing targets, and symlinked ancestors are rejected.
+- Directory deletion is non-recursive and fails unless the selected directory is empty.
 - Tree and search visibility share the same explicit-ignore, dotfile, and Git-ignored policy.
 - Search is loaded on demand and visits at most 5,000 directory entries per inventory. This bound keeps live fuzzy matching responsive in large workspaces. Mini previews retain at most 200 lines from the first 64 KiB of a file; binary and unreadable files are not rendered as text.
 - Git state uses NUL-delimited porcelain records, so whitespace, quotes, newlines, and renames remain filename-safe. Explicit refresh and successful mutations rescan it without polling.
