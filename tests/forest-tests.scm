@@ -62,6 +62,14 @@
               (string-append (canonicalize-path workspace) (path-separator) "sub/new file.txt"))
 (check-equal! "create kind" (cdr created) #f)
 (check-equal! "directory suffix" (cdr (forest-confined-create-path workspace "new-dir/")) #t)
+(check-equal! "create permits zero digits"
+              (car (forest-confined-create-path workspace "sub/file-01.txt"))
+              (string-append (canonicalize-path workspace) (path-separator) "sub/file-01.txt"))
+(check! "create rejects NUL"
+        (raises? (lambda ()
+                   (forest-confined-create-path
+                    workspace
+                    (string-append "bad" (string (integer->char 0)) "name")))))
 (for-each
  (lambda (name)
    (check! (string-append "reject create " name)
@@ -77,6 +85,9 @@
 (write-text! root-source "root")
 (check-equal! "rename root entry" (forest-confined-rename-path workspace root-source "renamed.txt")
               (string-append (canonicalize-path workspace) (path-separator) "renamed.txt"))
+(check-equal! "rename permits zero digits"
+              (forest-confined-rename-path workspace source "new-01.txt")
+              (string-append (canonicalize-path workspace) (path-separator) "sub/new-01.txt"))
 (for-each
  (lambda (name)
    (check! (string-append "reject rename " name)
@@ -194,6 +205,12 @@
 (check-equal! "preview byte bound" (car (list-ref byte-preview 0)) "abcdefgh")
 (check! "preview reports omitted bytes" (list-ref byte-preview 1))
 (check! "preview reads only one sentinel beyond budget" (<= (list-ref byte-preview 3) 9))
+
+(define utf8-path (string-append workspace (path-separator) "utf8.txt"))
+(write-text! utf8-path "aaaaaaaé")
+(define utf8-preview (forest-read-preview utf8-path 200 8))
+(check-equal! "preview trims a split UTF-8 code point" (car (list-ref utf8-preview 0)) "aaaaaaa")
+(check-equal! "split UTF-8 remains text" (list-ref utf8-preview 2) 'text)
 
 (define binary-path (string-append workspace (path-separator) "binary.dat"))
 (write-binary! binary-path)

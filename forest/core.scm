@@ -35,7 +35,7 @@
             (starts-with? input "/")
             (starts-with? input "\\")
             (forest-drive-absolute? input)
-            (forest-string-has-char? input #\0)
+            (forest-string-has-char? input (integer->char 0))
             (forest-string-has-char? input #\\))
     (error "path must be a non-empty workspace-relative path"))
   (define parts (split-many input (path-separator)))
@@ -211,6 +211,14 @@
          (or (= (bytes-ref bytes index) 0)
              (loop (+ index 1))))))
 
+(define (forest-decode-utf8-prefix bytes length retries)
+  (with-handler
+    (lambda (_)
+      (if (and (> retries 0) (> length 0))
+          (forest-decode-utf8-prefix bytes (- length 1) (- retries 1))
+          #f))
+    (bytes->string/utf8 bytes 0 length)))
+
 ;; Returns (lines truncated? kind bytes-read). One sentinel byte beyond the
 ;; declared budget detects truncation without reading the complete file.
 (define (forest-read-preview path max-lines max-bytes)
@@ -231,11 +239,13 @@
             (define visible-bytes (min bytes-read max-bytes))
             (if (forest-bytes-have-zero? bytes visible-bytes)
                 (list '("(binary file)") #f 'binary bytes-read)
-                (let* ([content (bytes->string/utf8 bytes 0 visible-bytes)]
-                       [all-lines (split-many content "\n")]
-                       [line-truncated? (> (length all-lines) max-lines)]
-                       [byte-truncated? (> bytes-read max-bytes)])
-                  (list (forest-take-core all-lines max-lines)
-                        (or line-truncated? byte-truncated?)
-                        'text
-                        bytes-read))))))))
+                (let ([content (forest-decode-utf8-prefix bytes visible-bytes 3)])
+                  (if (not content)
+                      (list '("(unable to preview)") #f 'unreadable bytes-read)
+                      (let* ([all-lines (split-many content "\n")]
+                             [line-truncated? (> (length all-lines) max-lines)]
+                             [byte-truncated? (> bytes-read max-bytes)])
+                        (list (forest-take-core all-lines max-lines)
+                              (or line-truncated? byte-truncated?)
+                              'text
+                              bytes-read))))))))))
