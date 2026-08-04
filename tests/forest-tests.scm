@@ -46,6 +46,9 @@
 (define (write-text! path content)
   (call-with-output-file path (lambda (port) (write-string content port))))
 
+(define (read-text path)
+  (call-with-input-file path (lambda (port) (read-port-to-string port))))
+
 (define (write-binary! path)
   (call-with-output-file path (lambda (port) (write-bytes (bytes 0 1 2 3) port))))
 
@@ -68,6 +71,12 @@
 (check-equal! "create permits Unix colon names"
               (car (forest-confined-create-path workspace "sub/a:b.txt"))
               (string-append (canonicalize-path workspace) (path-separator) "sub/a:b.txt"))
+(define exclusive-target (string-append workspace (path-separator) "exclusive.txt"))
+(write-text! exclusive-target "preserve")
+(check! "output-file creation refuses an existing target"
+        (raises? (lambda () (call-with-output-file exclusive-target (lambda (_) void)))))
+(check-equal! "exclusive creation preserves existing content"
+              (read-text exclusive-target) "preserve")
 (check! "create rejects NUL"
         (raises? (lambda ()
                    (forest-confined-create-path
@@ -91,6 +100,13 @@
 (check-equal! "rename permits zero digits"
               (forest-confined-rename-path workspace source "new-01.txt")
               (string-append (canonicalize-path workspace) (path-separator) "sub/new-01.txt"))
+(define no-clobber-source (string-append workspace (path-separator) "sub/move-source.txt"))
+(define no-clobber-target (string-append workspace (path-separator) "sub/move-target.txt"))
+(write-text! no-clobber-source "source")
+(write-text! no-clobber-target "target")
+(run! "mv" (list "-n" no-clobber-source no-clobber-target))
+(check! "no-clobber move retains its source" (path-exists? no-clobber-source))
+(check-equal! "no-clobber move preserves its target" (read-text no-clobber-target) "target")
 (for-each
  (lambda (name)
    (check! (string-append "reject rename " name)

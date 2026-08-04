@@ -694,11 +694,11 @@
           (begin
             (define target (forest-confined-create-path (helix-find-workspace) name))
             (define full (car target))
+            (forest-run-command! "mkdir" (list "-p" (forest-parent-path full)))
             (if (cdr target)
-                (forest-run-command! "mkdir" (list "-p" full))
+                (forest-run-command! "mkdir" (list full))
                 (begin
-                  (forest-run-command! "mkdir" (list "-p" (forest-parent-path full)))
-                  (forest-run-command! "touch" (list full))
+                  (call-with-output-file full (lambda (_) void))
                   (helix.open full)))
             (forest-info (string-append "created " name))
             (enqueue-thread-local-callback refresh!))))))))
@@ -718,7 +718,8 @@
             (lambda (err) (forest-error (string-append "rename failed: " (error-object-message err))))
             (begin
               (define target (forest-confined-rename-path (helix-find-workspace) path new-name))
-              (forest-run-command! "mv" (list path target))
+              (forest-run-command! "mv" (list "-n" path target))
+              (when (path-exists? path) (error "target already exists"))
               (forest-info (string-append "renamed " name " -> " new-name))
               (enqueue-thread-local-callback refresh!)))))))))
 

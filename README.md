@@ -130,7 +130,7 @@ Opening the tree reveals whatever file is currently open in the editor, cascadin
 
 ## Native checks
 
-The regression suite uses Steel and isolated temporary workspace, Git, and package roots. It does not read user configuration, reach the network, or leave child processes running.
+The regression suite syntax-checks the complete plugin, then exercises its core contracts with Steel and isolated temporary workspace, Git, and package roots. It does not read user configuration, reach the network, or leave child processes running.
 
 ```sh
 tests/run.sh
