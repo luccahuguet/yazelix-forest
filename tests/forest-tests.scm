@@ -184,6 +184,15 @@
 (check-equal! "literal quotes" (hash-try-get statuses "\"quoted\".txt") 'modified)
 (check! "ignored directory normalized" (hashset-contains? ignored "ignored dir"))
 
+;; glyph.hx has one general changed-file category. Preserve every porcelain-v1
+;; conflict and type-change code by mapping it to that category.
+(for-each
+ (lambda (code)
+   (check-equal! (string-append "changed Git status " code)
+                 (forest-git-status-symbol code)
+                 'modified))
+ (list "DD" "AU" "UD" "UA" "DU" "AA" "UU" "T " " T"))
+
 (define git-root (string-append test-root (path-separator) "git-workspace"))
 (mkdir! git-root)
 (run! "git" (list "-C" git-root "init" "-q"))

@@ -127,7 +127,7 @@ Opening the tree reveals whatever file is currently open in the editor, cascadin
 - Directory symlinks remain visible, but Forest does not expand or preview their targets. Deleting one removes the link without touching its target. Real child-directory deletion is non-recursive and fails unless the directory is empty.
 - Tree and search visibility share the same explicit-ignore, dotfile, and Git-ignored policy.
 - Search is loaded on demand and visits at most 5,000 directory entries per inventory. This bound keeps live fuzzy matching responsive in large workspaces. Mini previews retain at most 200 lines from the first 64 KiB of a file; binary and unreadable files are not rendered as text.
-- Git state uses NUL-delimited porcelain records, so whitespace, quotes, newlines, and renames remain filename-safe. Explicit refresh and successful mutations rescan it without polling.
+- Git state uses NUL-delimited porcelain records, so whitespace, quotes, newlines, and renames remain filename-safe. Conflicts and type changes remain visible through glyph.hx's general modified-file marker. Explicit refresh and successful mutations rescan state without polling.
 
 ## Native checks
 

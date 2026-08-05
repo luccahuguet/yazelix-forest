@@ -163,19 +163,14 @@
       #f
       (let ([x (string-ref code 0)] [y (string-ref code 1)])
         (cond
+          ;; glyph.hx has no dedicated conflict or type-change category.
+          [(member code '("DD" "AU" "UD" "UA" "DU" "AA" "UU")) 'modified]
           [(and (char=? x #\?) (char=? y #\?)) 'untracked]
           [(or (char=? x #\A) (char=? y #\A) (char=? x #\C) (char=? y #\C)) 'added]
           [(or (char=? x #\D) (char=? y #\D)) 'deleted]
           [(or (char=? x #\R) (char=? y #\R)) 'renamed]
-          [(or (char=? x #\M) (char=? y #\M)) 'modified]
+          [(or (char=? x #\M) (char=? y #\M) (char=? x #\T) (char=? y #\T)) 'modified]
           [else #f]))))
-
-(define (forest-git-rename-or-copy? code)
-  (and (= (string-length code) 2)
-       (or (char=? (string-ref code 0) #\R)
-           (char=? (string-ref code 1) #\R)
-           (char=? (string-ref code 0) #\C)
-           (char=? (string-ref code 1) #\C))))
 
 ;; Parses `git status --porcelain=v1 -z`. In -z mode rename/copy destinations
 ;; come first and their source is the following NUL record.
@@ -191,7 +186,8 @@
                      [path (if (string=? code "!!")
                                (trim-end-matches raw-path (path-separator))
                                raw-path)]
-                     [remaining (if (and (forest-git-rename-or-copy? code)
+                     [remaining (if (and (or (forest-string-has-char? code #\R)
+                                             (forest-string-has-char? code #\C))
                                          (pair? (cdr records)))
                                     (cddr records)
                                     (cdr records))])

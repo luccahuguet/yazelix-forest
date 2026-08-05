@@ -9,7 +9,7 @@
 - Keep filtered workspace roots visible in snacks and protect the root itself from deletion.
 - Report a bounded search as truncated only when at least one entry was omitted.
 - Resolve repeated path components through native parent semantics so current-file reveal and nested creation remain correct.
-- Parse Git status and ignored entries through NUL-delimited porcelain records and refresh state after explicit refreshes and mutations.
+- Parse Git status and ignored entries through NUL-delimited porcelain records, retain conflict and type-change markers, and refresh state after explicit refreshes and mutations.
 - Share hidden, ignored, and Git-ignored visibility semantics across both trees and searches.
 - Load search inventories on demand with a 5,000-entry work budget so live fuzzy matching remains responsive.
 - Bound mini previews to 200 lines and 64 KiB, with binary and unreadable-file fallbacks.
