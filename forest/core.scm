@@ -6,6 +6,7 @@
          forest-git-status-symbol
          forest-path-entry-symlink?
          forest-parse-git-status-z
+         forest-read-directory
          forest-read-preview
          forest-scan-files-bounded)
 
@@ -60,6 +61,35 @@
             (error "path has no existing ancestor")
             (forest-existing-ancestor parent)))))
 
+(define (forest-directory-entry<? left right)
+  (define left-directory? (list-ref left 2))
+  (define right-directory? (list-ref right 2))
+  (cond
+    [(and left-directory? (not right-directory?)) #t]
+    [(and right-directory? (not left-directory?)) #f]
+    [else (string<? (cadr left) (cadr right))]))
+
+;; Returns sorted (path name real-directory? symlink?) entries. DirEntry's file
+;; type does not follow links, so callers can render links without traversing
+;; them. Unreadable directories behave as empty ones.
+(define (forest-read-directory path)
+  (with-handler
+    (lambda (_) '())
+    (let ([iter (read-dir-iter path)])
+      (let loop ([entry (read-dir-iter-next! iter)] [result '()])
+        (if (not entry)
+            (sort result forest-directory-entry<?)
+            (let ([entry-path (read-dir-entry-path entry)]
+                  [name (read-dir-entry-file-name entry)])
+              (loop (read-dir-iter-next! iter)
+                    (if (and entry-path name)
+                        (cons (list entry-path
+                                    name
+                                    (read-dir-entry-is-dir? entry)
+                                    (read-dir-entry-is-symlink? entry))
+                              result)
+                        result))))))))
+
 (define (forest-path-entry-symlink? path)
   (with-handler
     (lambda (_) #f)
@@ -102,7 +132,7 @@
 ;; keeps it in the selected entry's canonical parent.
 (define (forest-confined-rename-path workspace source new-name)
   (forest-relative-path-components new-name #f)
-  (unless (path-exists? source)
+  (unless (or (path-exists? source) (forest-path-entry-symlink? source))
     (error "source does not exist"))
   (define lexical-root (canonicalize-path workspace))
   (define lexical-prefix (string-append workspace (path-separator)))

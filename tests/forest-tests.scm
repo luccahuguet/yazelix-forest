@@ -55,6 +55,16 @@
 (mkdir! outside)
 (run! "ln" (list "-s" outside (string-append workspace (path-separator) "escape")))
 
+(define workspace-entries (forest-read-directory workspace))
+(define sub-entry (car workspace-entries))
+(define escape-entry (cadr workspace-entries))
+(check-equal! "directory entries sort real directories first"
+              (map cadr workspace-entries)
+              '("sub" "escape"))
+(check! "real directory entry is traversable" (list-ref sub-entry 2))
+(check-equal! "directory link is not traversable" (list-ref escape-entry 2) #f)
+(check! "directory link retains link identity" (list-ref escape-entry 3))
+
 ;; Create is workspace-relative and may name nested descendants. Rename is one
 ;; basename in the selected entry's canonical parent.
 (define created (forest-confined-create-path workspace "sub/new file.txt"))
@@ -132,6 +142,20 @@
 (check-equal! "renamed destination is no longer a link"
               (forest-path-entry-symlink? link-target)
               #f)
+
+(define dangling-source (string-append workspace (path-separator) "sub/dangling-source"))
+(define dangling-target (string-append workspace (path-separator) "sub/dangling-target"))
+(run! "ln" (list "-s" (string-append outside (path-separator) "missing") dangling-source))
+(check-equal! "dangling link target does not exist" (path-exists? dangling-source) #f)
+(check-equal! "dangling link has a confined rename target"
+              (forest-confined-rename-path workspace dangling-source "dangling-target")
+              dangling-target)
+(rename-file-or-directory! dangling-source dangling-target)
+(check-equal! "dangling link rename removes the old entry"
+              (forest-path-entry-symlink? dangling-source)
+              #f)
+(check! "dangling link rename preserves the link entry"
+        (forest-path-entry-symlink? dangling-target))
 (for-each
  (lambda (name)
    (check! (string-append "reject rename " name)

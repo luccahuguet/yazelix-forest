@@ -197,9 +197,6 @@
       s
       (string-append (substring s 0 (max 0 (- max-w 1))) "…")))
 
-(define (forest-repeat-str s n)
-  (if (<= n 0) "" (string-append s (forest-repeat-str s (- n 1)))))
-
 (struct ForestHelpState ())
 (define *forest-help-open?* #f)
 (define *forest-help-style* 'snacks)
@@ -349,12 +346,6 @@
 
 (define (forest-searching?) (not (equal? *forest-query* "")))
 
-;; dirs before files, alphabetic order
-(define (forest-sort-entries lst)
-  (define dirs (sort (filter is-dir? lst) string<?))
-  (define files (sort (filter (lambda (p) (not (is-dir? p))) lst) string<?))
-  (append dirs files))
-
 (define (forest-dir-marker path)
   (if (hash-contains? *forest-directories* path)
       (if (hash-try-get *forest-directories* path) "▶ " "▼ ")
@@ -362,19 +353,22 @@
 
 (define (forest-build-tree!)
   (define result '())
-  (define (walk path depth)
-    (define name (file-name path))
+  (define (walk entry depth)
+    (define path (car entry))
+    (define name (cadr entry))
+    (define directory? (list-ref entry 2))
     (when (forest-visible-path? path)
-      (define indent (forest-repeat-str "  " depth))
-      (define marker (if (is-dir? path) (forest-dir-marker path) "  "))
-      (set! result (cons (list path indent marker name) result))
-      (when (is-dir? path)
+      (define indent (make-string (* 2 depth) #\space))
+      (define marker (if directory? (forest-dir-marker path) "  "))
+      (set! result (cons (list path indent marker name directory?) result))
+      (when directory?
         (unless (hash-contains? *forest-directories* path)
           (set! *forest-directories* (hash-insert *forest-directories* path (> depth 0))))
         (unless (hash-try-get *forest-directories* path)
           (for-each (lambda (child) (walk child (+ depth 1)))
-                    (forest-sort-entries (read-dir path)))))))
-  (walk (helix-find-workspace) 0)
+                    (forest-read-directory path))))))
+  (define workspace (helix-find-workspace))
+  (walk (list workspace (file-name workspace) #t #f) 0)
   (set! *forest-tree* (reverse result)))
 
 ;; marks every old dir between the workspace root and path as open
@@ -460,6 +454,9 @@
       (and (not (null? *forest-tree*))
            (list-ref *forest-tree* *forest-cursor*))))
 
+(define (forest-current-entry-directory? entry)
+  (and (not (forest-searching?)) (list-ref entry 4)))
+
 (define (forest-refresh-search!)
   (set! *forest-search-results*
         (if (forest-searching?) (fuzzy-match *forest-query* *forest-all-files*) '())))
@@ -532,15 +529,16 @@
   (define entry (forest-current-entry))
   (cond
     [(not entry) event-result/consume]
+    [(forest-current-entry-directory? entry)
+     (forest-toggle-dir! (car entry))
+     event-result/consume]
     [(is-file? (car entry))
      (define path (car entry))
      ;; hand focus to the buffer about to open
      (set! *forest-focused* #f)
      (enqueue-thread-local-callback (lambda () (helix.open path)))
      event-result/close]
-    [(is-dir? (car entry))
-     (forest-toggle-dir! (car entry))
-     event-result/consume]))
+    [else event-result/consume]))
 
 (define (forest-unfocus!)
   (forest-reset-mouse!)
@@ -715,7 +713,11 @@
 (define (forest-prompt-delete-entry! entry refresh!)
   (define path (car entry))
   (define name (file-name path))
-  (define kind (if (is-dir? path) "directory" "file"))
+  (define kind
+    (cond
+      [(forest-path-entry-symlink? path) "symbolic link"]
+      [(is-dir? path) "directory"]
+      [else "file"]))
   (enqueue-thread-local-callback
    (lambda ()
      (forest-show-modal!
@@ -738,7 +740,7 @@
   (when entry
     (define path (car entry))
     (forest-prompt-create-at!
-     (if (is-dir? path)
+     (if (forest-current-entry-directory? entry)
          (string-append path (path-separator))
          (string-append (parent-name path) (path-separator)))
      forest-refresh-all!)))
@@ -814,7 +816,7 @@
         (let* ([name (car items)]
                [val (hash-try-get node name)]
                [dir? (hash? val)]
-               [own (forest-repeat-str "  " depth)]
+               [own (make-string (* 2 depth) #\space)]
                [rel (if (equal? path "") name (string-append path (path-separator) name))]
                [entry (list own dir? name rel)])
           (append (list entry)
@@ -1126,7 +1128,7 @@
             (define marker (list-ref entry 2))
             (define name (list-ref entry 3))
             (define prefix (string-append indent marker))
-            (define dir? (is-dir? path))
+            (define dir? (list-ref entry 4))
             (define icon (if dir? (glyph-dir-icon name) (glyph-icon name)))
             (define icon-color (if dir? (glyph-dir-color name) (glyph-color name)))
             (define git-status (and (not dir?) (forest-git-status path)))
@@ -1250,7 +1252,8 @@
     [(key-event-enter? event) (forest-activate!)]
     [(key-event-tab? event)
      (define entry (forest-current-entry))
-     (when (and entry (is-dir? (car entry))) (forest-toggle-dir! (car entry)))
+     (when (and entry (forest-current-entry-directory? entry))
+       (forest-toggle-dir! (car entry)))
      event-result/consume]
 
     [(key-event-escape? event)
@@ -1365,21 +1368,13 @@
 (struct ForestMiniColumn (path entries cursor))
 
 (define (forest-mini-list-dir path)
-  (define children
-    (filter (lambda (p) (forest-visible-path? p))
-            (with-handler (lambda (_) '()) (read-dir path))))
-  (map (lambda (p) (cons p (file-name p))) (forest-sort-entries children)))
+  (filter (lambda (entry) (forest-visible-path? (car entry)))
+          (forest-read-directory path)))
 
 (define (forest-mini-cursor col) (unbox (ForestMiniColumn-cursor col)))
 (define (forest-mini-set-cursor! col v) (set-box! (ForestMiniColumn-cursor col) v))
 
-(define (forest-mini-last lst)
-  (if (null? (cdr lst)) (car lst) (forest-mini-last (cdr lst))))
-
-(define (forest-mini-drop-last lst)
-  (if (null? (cdr lst)) '() (cons (car lst) (forest-mini-drop-last (cdr lst)))))
-
-(define (forest-mini-active-column) (forest-mini-last *forest-mini-stack*))
+(define (forest-mini-active-column) (last *forest-mini-stack*))
 
 (define (forest-mini-current-entry)
   (define col (forest-mini-active-column))
@@ -1403,7 +1398,7 @@
   (define entry (forest-mini-current-entry))
   (cond
     [(not entry) event-result/consume]
-    [(is-dir? (car entry))
+    [(list-ref entry 2)
      (set! *forest-mini-stack*
            (append *forest-mini-stack*
                    (list (ForestMiniColumn (car entry) (forest-mini-list-dir (car entry)) (box 0)))))
@@ -1418,7 +1413,7 @@
 ;; steps back to the parent column
 (define (forest-mini-back!)
   (when (> (length *forest-mini-stack*) 1)
-    (set! *forest-mini-stack* (forest-mini-drop-last *forest-mini-stack*))))
+    (set! *forest-mini-stack* (take *forest-mini-stack* (- (length *forest-mini-stack*) 1)))))
 
 ;; refreshes every column after a visibility toggle
 (define (forest-mini-refresh-all!)
@@ -1457,9 +1452,9 @@
     (cond
       [(null? comps) (reverse (cons (ForestMiniColumn dir entries (box 0)) acc))]
       [else
-       (define idx (forest-mini-index-of (map cdr entries) (car comps)))
+       (define idx (forest-mini-index-of (map cadr entries) (car comps)))
        (define col (ForestMiniColumn dir entries (box (if idx idx 0))))
-       (if (and idx (pair? (cdr comps)))
+       (if (and idx (pair? (cdr comps)) (list-ref (list-ref entries idx) 2))
            (loop (car (list-ref entries idx)) (cdr comps) (cons col acc))
            (reverse (cons col acc)))])))
 
@@ -1474,7 +1469,7 @@
 ;; panels grow and shrink with their own content with safe bound clamping
 (define (forest-mini-longest-name entries)
   (let loop ([lst entries] [best 0])
-    (if (null? lst) best (loop (cdr lst) (max best (string-length (cdr (car lst))))))))
+    (if (null? lst) best (loop (cdr lst) (max best (string-length (cadr (car lst))))))))
 
 (define *forest-mini-width-boost* 0)
 
@@ -1518,7 +1513,7 @@
   (define entry (forest-mini-current-entry))
   (cond
     [(not entry) (list 'empty #f)]
-    [(is-dir? (car entry)) (list 'dir (forest-mini-list-dir (car entry)))]
+    [(list-ref entry 2) (list 'dir (forest-mini-list-dir (car entry)))]
     [(is-file? (car entry))
      (list 'file
            (list-ref (forest-read-preview (car entry)
@@ -1569,15 +1564,15 @@
         (unless (or (null? items) (>= row h))
           (define e (car items))
           (define idx (+ ws row))
-          (define dir? (is-dir? (car e)))
+          (define dir? (list-ref e 2))
           (define hl? (and active? (= idx cursor)))
-          (define icon (if dir? (glyph-dir-icon (cdr e)) (glyph-icon (cdr e))))
-          (define icon-color (if dir? (glyph-dir-color (cdr e)) (glyph-color (cdr e))))
+          (define icon (if dir? (glyph-dir-icon (cadr e)) (glyph-icon (cadr e))))
+          (define icon-color (if dir? (glyph-dir-color (cadr e)) (glyph-color (cadr e))))
           (define git-status (and (not dir?) (forest-git-status (car e))))
           (define git-icon (if git-status (glyph-git-icon git-status) " "))
           (define git-color (if git-status (glyph-git-color git-status) #f))
           (define row-style (cond [hl? hl-style] [dir? dir-style] [else text-style]))
-          (define name (string-append (cdr e) (if dir? (path-separator) "")))
+          (define name (string-append (cadr e) (if dir? (path-separator) "")))
           (define icon-w (string-length icon))
           (define git-x (+ x icon-w 1))
           (define git-w (if dir? 0 1))
@@ -1672,7 +1667,7 @@
   (cond
     ;; a short directory is padded to the minimum height; that padding is inert
     [(or (< row 0) (>= row (cadr *forest-mini-hit-preview*))) event-result/consume]
-    [(not (and entry (is-dir? (car entry)))) event-result/consume]
+    [(not (and entry (list-ref entry 2))) event-result/consume]
     [else
      (define result (forest-mini-enter!))
      (define col (forest-mini-active-column))
