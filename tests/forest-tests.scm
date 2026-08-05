@@ -254,9 +254,19 @@
 (check-equal! "scan does not follow directory symlinks"
               (member (string-append workspace (path-separator) "escape/outside.txt") scan-files) #f)
 
-(define limited-scan (forest-scan-files-bounded workspace (lambda (_path _name) #t) 2))
-(check! "scan work is bounded" (<= (list-ref limited-scan 2) 2))
-(check! "scan reports its bound" (list-ref limited-scan 1))
+(define budget-root (string-append test-root (path-separator) "budget-tree"))
+(mkdir! budget-root)
+(for-each
+ (lambda (name) (write-text! (string-append budget-root (path-separator) name) name))
+ '("one" "two" "three"))
+(define exact-scan (forest-scan-files-bounded budget-root (lambda (_path _name) #t) 3))
+(check-equal! "scan does not truncate an exact budget"
+              (list (length (car exact-scan)) (list-ref exact-scan 1) (list-ref exact-scan 2))
+              '(3 #f 3))
+(define limited-scan (forest-scan-files-bounded budget-root (lambda (_path _name) #t) 2))
+(check-equal! "scan truncates beyond its budget"
+              (list (length (car limited-scan)) (list-ref limited-scan 1) (list-ref limited-scan 2))
+              '(2 #t 2))
 
 ;; Preview reads at most byte-budget + one sentinel byte and retains at most the
 ;; line budget. Binary data is classified without attempting to render it.

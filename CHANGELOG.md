@@ -7,6 +7,7 @@
 - Keep directory traversal on real entries so tree expansion and mini previews never follow directory symlinks, and identify those entries accurately in delete confirmations.
 - Permit confined rename of dangling symlink entries; deletion remains link-local.
 - Keep filtered workspace roots visible in snacks and protect the root itself from deletion.
+- Report a bounded search as truncated only when at least one entry was omitted.
 - Resolve repeated path components through native parent semantics so current-file reveal and nested creation remain correct.
 - Parse Git status and ignored entries through NUL-delimited porcelain records and refresh state after explicit refreshes and mutations.
 - Share hidden, ignored, and Git-ignored visibility semantics across both trees and searches.

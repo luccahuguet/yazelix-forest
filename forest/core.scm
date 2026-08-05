@@ -225,9 +225,7 @@
              (cond
                [(read-dir-entry-is-dir? entry) (walk path)]
                [(read-dir-entry-is-file? entry) (set! files (cons path files))]))
-           (if (>= visited max-entries)
-               (set! truncated? #t)
-               (loop (read-dir-iter-next! iter)))]))))
+           (loop (read-dir-iter-next! iter))]))))
   (walk root)
   (list (sort files string<?) truncated? visited))
 
