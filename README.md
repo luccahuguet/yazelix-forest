@@ -123,7 +123,8 @@ Opening the tree reveals whatever file is currently open in the editor, cascadin
 - Mouse support needs Helix's own `editor.mouse` left on (it is by default).
 - Two clicks on an entry activate it. They needn't be quick, but a keypress in between cancels.
 - Create paths stay within the canonical workspace, and rename accepts one basename as an exact destination in the selected entry's parent. Traversal, absolute paths, alternate separators, existing targets observed during validation, and symlinked ancestors are rejected.
-- Directory symlinks remain visible, but Forest does not expand or preview their targets. Deleting one removes the link without touching its target. Real directory deletion is non-recursive and fails unless the directory is empty.
+- The workspace root remains visible in snacks even when its name matches a visibility filter, and Forest never deletes it.
+- Directory symlinks remain visible, but Forest does not expand or preview their targets. Deleting one removes the link without touching its target. Real child-directory deletion is non-recursive and fails unless the directory is empty.
 - Tree and search visibility share the same explicit-ignore, dotfile, and Git-ignored policy.
 - Search is loaded on demand and visits at most 5,000 directory entries per inventory. This bound keeps live fuzzy matching responsive in large workspaces. Mini previews retain at most 200 lines from the first 64 KiB of a file; binary and unreadable files are not rendered as text.
 - Git state uses NUL-delimited porcelain records, so whitespace, quotes, newlines, and renames remain filename-safe. Explicit refresh and successful mutations rescan it without polling.

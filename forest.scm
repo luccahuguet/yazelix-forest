@@ -357,7 +357,7 @@
     (define path (car entry))
     (define name (cadr entry))
     (define directory? (list-ref entry 2))
-    (when (forest-visible-path? path)
+    (when (or (= depth 0) (forest-visible-path? path))
       (define indent (make-string (* 2 depth) #\space))
       (define marker (if directory? (forest-dir-marker path) "  "))
       (set! result (cons (list path indent marker name directory?) result))
@@ -368,7 +368,7 @@
           (for-each (lambda (child) (walk child (+ depth 1)))
                     (forest-read-directory path))))))
   (define workspace (helix-find-workspace))
-  (walk (list workspace (file-name workspace) #t #f) 0)
+  (walk (list workspace (file-name workspace) #t) 0)
   (set! *forest-tree* (reverse result)))
 
 ;; marks every old dir between the workspace root and path as open
@@ -751,7 +751,10 @@
 
 (define (forest-prompt-delete!)
   (define entry (forest-current-entry))
-  (when entry (forest-prompt-delete-entry! entry forest-refresh-all!)))
+  (when entry
+    (if (equal? (car entry) (helix-find-workspace))
+        (forest-error "delete failed: workspace root is protected")
+        (forest-prompt-delete-entry! entry forest-refresh-all!))))
 
 (struct ForestBgState ())
 

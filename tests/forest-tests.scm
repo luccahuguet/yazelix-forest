@@ -63,7 +63,6 @@
               '("sub" "escape"))
 (check! "real directory entry is traversable" (list-ref sub-entry 2))
 (check-equal! "directory link is not traversable" (list-ref escape-entry 2) #f)
-(check! "directory link retains link identity" (list-ref escape-entry 3))
 
 ;; Create is workspace-relative and may name nested descendants. Rename is one
 ;; basename in the selected entry's canonical parent.

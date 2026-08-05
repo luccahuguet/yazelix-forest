@@ -64,14 +64,13 @@
 (define (forest-directory-entry<? left right)
   (define left-directory? (list-ref left 2))
   (define right-directory? (list-ref right 2))
-  (cond
-    [(and left-directory? (not right-directory?)) #t]
-    [(and right-directory? (not left-directory?)) #f]
-    [else (string<? (cadr left) (cadr right))]))
+  (if (equal? left-directory? right-directory?)
+      (string<? (cadr left) (cadr right))
+      left-directory?))
 
-;; Returns sorted (path name real-directory? symlink?) entries. DirEntry's file
-;; type does not follow links, so callers can render links without traversing
-;; them. Unreadable directories behave as empty ones.
+;; Returns sorted (path name real-directory?) entries. DirEntry's file type does
+;; not follow links, so callers can render links without traversing them.
+;; Unreadable directories behave as empty ones.
 (define (forest-read-directory path)
   (with-handler
     (lambda (_) '())
@@ -85,8 +84,7 @@
                     (if (and entry-path name)
                         (cons (list entry-path
                                     name
-                                    (read-dir-entry-is-dir? entry)
-                                    (read-dir-entry-is-symlink? entry))
+                                    (read-dir-entry-is-dir? entry))
                               result)
                         result))))))))
 
