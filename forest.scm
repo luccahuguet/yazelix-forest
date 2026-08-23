@@ -222,7 +222,7 @@
       (or *forest-search-color-focused* (forest-hex->color *forest-search-default-focused*))
       (or *forest-search-color-unfocused* (forest-hex->color *forest-search-default-unfocused*))))
 
-;; keep the panel off the rows moka's bars uses
+;; keep the panel off the rows moka and scopeline reserve
 (define *forest-reserved-top-fn* 'unresolved)
 (define *forest-reserved-bottom-fn* 'unresolved)
 
@@ -233,11 +233,30 @@
 
 (define (forest-reserved-top)
   (forest-resolve-reserved!)
-  (if *forest-reserved-top-fn* (with-handler (lambda (_) 0) (*forest-reserved-top-fn*)) 0))
+  (+ (if *forest-reserved-top-fn* (with-handler (lambda (_) 0) (*forest-reserved-top-fn*)) 0)
+     (with-handler (lambda (_) 0)
+       (let ([v (eval-string "(scopeline-reserved-top)")])
+         (if (number? v) v 0)))))
 
 (define (forest-reserved-bottom)
   (forest-resolve-reserved!)
   (if *forest-reserved-bottom-fn* (with-handler (lambda (_) 0) (*forest-reserved-bottom-fn*)) 0))
+
+(define *forest-moka-clip-fn* 'unresolved)
+(define *forest-scopeline-clip-fn* 'unresolved)
+
+(define (forest-resolve-clip-fns!)
+  (when (equal? *forest-moka-clip-fn* 'unresolved)
+    (set! *forest-moka-clip-fn* (with-handler (lambda (_) #f) (eval 'moka-set-forest-clip!)))
+    (set! *forest-scopeline-clip-fn* (with-handler (lambda (_) #f) (eval 'scopeline-set-forest-clip!)))))
+
+;; tell moka and scopeline where the snacks sidebar is, so their bars stop at the buffer
+(define (forest-publish-clip! side w)
+  (forest-resolve-clip-fns!)
+  (when *forest-moka-clip-fn*
+    (with-handler (lambda (_) #f) (*forest-moka-clip-fn* side w)))
+  (when *forest-scopeline-clip-fn*
+    (with-handler (lambda (_) #f) (*forest-scopeline-clip-fn* side w))))
 
 (define (forest-take lst n)
   (if (or (null? lst) (<= n 0)) '() (cons (car lst) (forest-take (cdr lst) (- n 1)))))
@@ -608,6 +627,7 @@
   (set! *forest-focused* #f)
   (pop-last-component-by-name! "forest-fg")
   (pop-last-component-by-name! "forest-bg")
+  (forest-publish-clip! #f 0)
   (enqueue-thread-local-callback
    (lambda ()
      (if (equal? *forest-side* 'right)
@@ -817,6 +837,8 @@
 ;; panel's left edge is 0 when left else put against the right edge
 (define (forest-panel-x0 rect w)
   (if (equal? *forest-side* 'right) (- (area-width rect) w) 0))
+
+(define (forest-snacks-y0) 1)
 
 (define *forest-query-prefix* "> ")
 
@@ -1036,16 +1058,14 @@
   (define w (min *forest-width* (area-width rect)))
   (define h (area-height rect))
   (define x0 (forest-panel-x0 rect w))
-  ;; panel spans only the rows not reserved by the bars
-  (define y0 (forest-reserved-top))
-  (define panel-h (max 1 (- h y0 (forest-reserved-bottom))))
-  ;; native statusline still owns the last row unless moka reserved the bottom
-  (define statusline-rows (if (> (forest-reserved-bottom) 0) 0 1))
-  ;; the list fills from just under the search box down to just above the statusline
-  (set! *forest-visible-height* (max 1 (- panel-h *forest-search-height* statusline-rows)))
+  ;; one blank row above the search box
+  (define y0 (forest-snacks-y0))
+  (define panel-h (max 1 (- h y0)))
+  (set! *forest-visible-height* (max 1 (- panel-h *forest-search-height*)))
   (if (equal? *forest-side* 'right)
       (set-editor-clip-right! w)
       (set-editor-clip-left! w))
+  (forest-publish-clip! *forest-side* w)
 
   ;; theme components a configured sidebar background tints only these panel
   ;; styles, so the buffer keeps the theme background
@@ -1102,10 +1122,8 @@
 
   (when *forest-show-separator?*
     (define sep-x (if (equal? *forest-side* 'right) (- x0 1) (- (+ x0 w) 1)))
-    ;; runs the full panel height, from the reserved top down to just above the
-    ;; statusline, so it respects moka's bufferline and statusline rows
     (define sep-top y0)
-    (define sep-bottom (- (+ y0 panel-h) statusline-rows 1))
+    (define sep-bottom (- (+ y0 panel-h) 1))
     (when (and (>= sep-x 0) (< sep-x (area-width rect)))
       (let loop ([y sep-top])
         (when (<= y sep-bottom)
@@ -1263,7 +1281,7 @@
              [x0 (forest-panel-x0 area w)]
              [box-x (if (and *forest-show-separator?* (not (equal? *forest-side* 'right)))
                         (+ x0 1) x0)])
-        (position (+ (forest-reserved-top) 1)
+        (position (+ (forest-snacks-y0) 1)
                   (+ box-x 1 (string-length *forest-query-prefix*) (string-length *forest-query*))))
       #f))
 
