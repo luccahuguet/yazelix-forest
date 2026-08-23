@@ -242,21 +242,22 @@
   (forest-resolve-reserved!)
   (if *forest-reserved-bottom-fn* (with-handler (lambda (_) 0) (*forest-reserved-bottom-fn*)) 0))
 
-(define *forest-moka-clip-fn* 'unresolved)
-(define *forest-scopeline-clip-fn* 'unresolved)
-
-(define (forest-resolve-clip-fns!)
-  (when (equal? *forest-moka-clip-fn* 'unresolved)
-    (set! *forest-moka-clip-fn* (with-handler (lambda (_) #f) (eval 'moka-set-forest-clip!)))
-    (set! *forest-scopeline-clip-fn* (with-handler (lambda (_) #f) (eval 'scopeline-set-forest-clip!)))))
-
 ;; tell moka and scopeline where the snacks sidebar is, so their bars stop at the buffer
+;; eval-string so a missing plugin is a no-op instead of a load error
 (define (forest-publish-clip! side w)
-  (forest-resolve-clip-fns!)
-  (when *forest-moka-clip-fn*
-    (with-handler (lambda (_) #f) (*forest-moka-clip-fn* side w)))
-  (when *forest-scopeline-clip-fn*
-    (with-handler (lambda (_) #f) (*forest-scopeline-clip-fn* side w))))
+  (define side-expr (if side (string-append "'" (symbol->string side)) "#f"))
+  (define w-expr (number->string (if (number? w) w 0)))
+  (define args (string-append " " side-expr " " w-expr ")"))
+  (with-handler (lambda (_) #f)
+    (eval-string (string-append "(moka-set-forest-clip!" args)))
+  (with-handler (lambda (_) #f)
+    (eval-string (string-append "(scopeline-set-forest-clip!" args))))
+
+(define (forest-clear-clip!)
+  (forest-publish-clip! #f 0)
+  (if (equal? *forest-side* 'right)
+      (set-editor-clip-right! 0)
+      (set-editor-clip-left! 0)))
 
 (define (forest-take lst n)
   (if (or (null? lst) (<= n 0)) '() (cons (car lst) (forest-take (cdr lst) (- n 1)))))
@@ -484,7 +485,11 @@
   (forest-open-ancestors-for-file! path)
   (forest-build-tree!)
   (unless (forest-searching?)
-    (forest-seek-file! path)))
+    (forest-seek-file! path))
+  ;; workspace row is only a parent, start on its first child so j/k work immediately
+  (let ([entry (forest-current-entry)])
+    (when (and entry (equal? (car entry) (helix-find-workspace)))
+      (forest-enter-dir! (car entry)))))
 
 ;; flat recursive file list for search
 ;; searches files indepedent of the fold state
@@ -721,14 +726,13 @@
   (forest-help-dismiss!)
   (set! *forest-active* #f)
   (set! *forest-focused* #f)
+  (forest-clear-clip!)
   (pop-last-component-by-name! "forest-fg")
   (pop-last-component-by-name! "forest-bg")
-  (forest-publish-clip! #f 0)
   (enqueue-thread-local-callback
    (lambda ()
-     (if (equal? *forest-side* 'right)
-         (set-editor-clip-right! 0)
-         (set-editor-clip-left! 0)))))
+     (forest-clear-clip!)
+     (helix.redraw '()))))
 
 (define (forest-wider!)
   (set! *forest-width* (min *forest-max-width* (+ *forest-width* 2)))
@@ -1158,10 +1162,13 @@
   (define y0 (forest-snacks-y0))
   (define panel-h (max 1 (- h y0)))
   (set! *forest-visible-height* (max 1 (- panel-h *forest-search-height*)))
-  (if (equal? *forest-side* 'right)
-      (set-editor-clip-right! w)
-      (set-editor-clip-left! w))
-  (forest-publish-clip! *forest-side* w)
+  (if *forest-active*
+      (begin
+        (if (equal? *forest-side* 'right)
+            (set-editor-clip-right! w)
+            (set-editor-clip-left! w))
+        (forest-publish-clip! *forest-side* w))
+      (forest-clear-clip!))
 
   ;; theme components a configured sidebar background tints only these panel
   ;; styles, so the buffer keeps the theme background
@@ -1418,7 +1425,7 @@
     [(equal? action 'wider) (forest-wider!) event-result/consume]
     [(equal? action 'narrower) (forest-narrower!) event-result/consume]
     [(equal? action 'menu) (forest-whichkey-open! 'snacks forest-command-action!) event-result/consume]
-    [(equal? action 'quit) (forest-close!) event-result/close]
+    [(equal? action 'quit) (forest-close!) event-result/consume]
     [else event-result/consume]))
 
 (define (forest-handle-event-command state event)
