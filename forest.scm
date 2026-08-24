@@ -81,8 +81,8 @@
 (define *forest-default-keybinds*
   (hash 'down "j"
         'up "k"
-        'enter "l" ; in mini, in addition to the right arrow/Enter
-        'back "h" ; in mini, addition to the left arrow
+        'enter "l" ; snacks: enter dir or open file; mini: cascade
+        'back "h" ; snacks: leave folder; mini: parent column
         'search "/"
         'create "n"
         'rename "r"
@@ -113,6 +113,24 @@
 (provide forest-set-keybinds!)
 (provide forest-set-sidebar-bg!)
 (provide forest-set-search-color!)
+(provide forest-snacks-active?)
+(provide forest-snacks-side)
+(provide forest-snacks-width)
+
+;;@doc
+;; true while the snacks sidebar is open, so plugins wont go over sidebar
+(define (forest-snacks-active?)
+  (and *forest-active* (equal? *forest-style* 'snacks)))
+
+;;@doc
+;; Side the snacks sidebar sits on: 'left or 'right
+(define (forest-snacks-side)
+  *forest-side*)
+
+;;@doc
+;; Width in columns of the snacks sidebar, 0 while it is closed
+(define (forest-snacks-width)
+  (if (and *forest-active* (equal? *forest-style* 'snacks)) *forest-width* 0))
 
 ;;@doc
 ;; Override any subset of forest's keybindings from init.scm
@@ -172,7 +190,7 @@
       (or *forest-search-color-focused* (forest-hex->color *forest-search-default-focused*))
       (or *forest-search-color-unfocused* (forest-hex->color *forest-search-default-unfocused*))))
 
-;; keep the panel off the rows moka's bars uses
+;; keep the panel off the rows moka and scopeline reserve
 (define *forest-reserved-top-fn* 'unresolved)
 (define *forest-reserved-bottom-fn* 'unresolved)
 
@@ -183,11 +201,31 @@
 
 (define (forest-reserved-top)
   (forest-resolve-reserved!)
-  (if *forest-reserved-top-fn* (with-handler (lambda (_) 0) (*forest-reserved-top-fn*)) 0))
+  (+ (if *forest-reserved-top-fn* (with-handler (lambda (_) 0) (*forest-reserved-top-fn*)) 0)
+     (with-handler (lambda (_) 0)
+       (let ([v (eval-string "(scopeline-reserved-top)")])
+         (if (number? v) v 0)))))
 
 (define (forest-reserved-bottom)
   (forest-resolve-reserved!)
   (if *forest-reserved-bottom-fn* (with-handler (lambda (_) 0) (*forest-reserved-bottom-fn*)) 0))
+
+;; tell moka and scopeline where the snacks sidebar is, so their bars stop at the buffer
+;; eval-string so a missing plugin is a no-op instead of a load error
+(define (forest-publish-clip! side w)
+  (define side-expr (if side (string-append "'" (symbol->string side)) "#f"))
+  (define w-expr (number->string (if (number? w) w 0)))
+  (define args (string-append " " side-expr " " w-expr ")"))
+  (with-handler (lambda (_) #f)
+    (eval-string (string-append "(moka-set-forest-clip!" args)))
+  (with-handler (lambda (_) #f)
+    (eval-string (string-append "(scopeline-set-forest-clip!" args))))
+
+(define (forest-clear-clip!)
+  (forest-publish-clip! #f 0)
+  (if (equal? *forest-side* 'right)
+      (set-editor-clip-right! 0)
+      (set-editor-clip-left! 0)))
 
 (define (forest-drop lst n)
   (if (or (null? lst) (<= n 0)) lst (forest-drop (cdr lst) (- n 1))))
@@ -213,9 +251,10 @@
 ;; snaks keybinds
 (define (forest-snacks-help-rows)
   (list
-   (list (string-append (forest-help-key 'down) " / " (forest-help-key 'up) " / ↑ / ↓") "Navigate")
-   (list "Enter" "Open file or toggle dir")
-   (list "Tab" "Toggle directory")
+    (list (string-append (forest-help-key 'down) " / " (forest-help-key 'up) " / ↑ / ↓") "Navigate in folder")
+    (list (string-append (forest-help-key 'enter) " / →") "Enter dir or open file")
+    (list (string-append (forest-help-key 'back) " / ←") "Leave folder")
+    (list "Enter / Tab" "Toggle directory")
    (list (forest-help-key 'search) "Fuzzy search")
    (list (forest-help-key 'create) "Create file or dir")
    (list (forest-help-key 'rename) "Rename entry")
@@ -403,7 +442,11 @@
   (forest-open-ancestors-for-file! path)
   (forest-build-tree!)
   (unless (forest-searching?)
-    (forest-seek-file! path)))
+    (forest-seek-file! path))
+  ;; workspace row is only a parent, start on its first child so j/k work immediately
+  (let ([entry (forest-current-entry)])
+    (when (and entry (equal? (car entry) (helix-find-workspace)))
+      (forest-enter-dir! (car entry)))))
 
 ;; Flat recursive file list for search, independent of fold state. It is loaded
 ;; only when search starts and bounded by directory entries visited.
@@ -433,18 +476,62 @@
 (define (forest-active-count)
   (if (forest-searching?) (length *forest-search-results*) (length *forest-tree*)))
 
+(define (forest-index-of lst x)
+  (let loop ([xs lst] [i 0])
+    (cond
+      [(null? xs) #f]
+      [(equal? (car xs) x) i]
+      [else (loop (cdr xs) (+ i 1))])))
+
+(define (forest-wrap i n)
+  (cond
+    [(< i 0) (- n 1)]
+    [(>= i n) 0]
+    [else i]))
+
+(define (forest-ensure-cursor-visible!)
+  (define last-vis (+ *forest-window-start* (- *forest-visible-height* 1)))
+  (when (> *forest-cursor* last-vis)
+    (set! *forest-window-start* (- *forest-cursor* (- *forest-visible-height* 1))))
+  (when (< *forest-cursor* *forest-window-start*)
+    (set! *forest-window-start* *forest-cursor*)))
+
+;; indices of entries that share the current entry's parent
+(define (forest-sibling-indices)
+  (define entry (forest-current-entry))
+  (if (not entry)
+      '()
+      (let ([parent (forest-parent-path (car entry))])
+        (let loop ([items *forest-tree*] [i 0] [acc '()])
+          (cond
+            [(null? items) (reverse acc)]
+            [(equal? (forest-parent-path (car (car items))) parent)
+             (loop (cdr items) (+ i 1) (cons i acc))]
+            [else (loop (cdr items) (+ i 1) acc)])))))
+
+(define (forest-cursor-sibling! delta)
+  (define idxs (forest-sibling-indices))
+  (define n (length idxs))
+  (define pos (forest-index-of idxs *forest-cursor*))
+  (when (and (> n 0) pos)
+    (set! *forest-cursor* (list-ref idxs (forest-wrap (+ pos delta) n)))
+    (forest-ensure-cursor-visible!)))
+
 (define (forest-cursor-down!)
-  (define n (forest-active-count))
-  (when (< *forest-cursor* (- n 1))
-    (set! *forest-cursor* (+ *forest-cursor* 1))
-    (when (> *forest-cursor* (+ *forest-window-start* (- *forest-visible-height* 1)))
-      (set! *forest-window-start* (+ *forest-window-start* 1)))))
+  (if (forest-searching?)
+      (let ([n (forest-active-count)])
+        (when (> n 0)
+          (set! *forest-cursor* (forest-wrap (+ *forest-cursor* 1) n))
+          (forest-ensure-cursor-visible!)))
+      (forest-cursor-sibling! 1)))
 
 (define (forest-cursor-up!)
-  (when (> *forest-cursor* 0)
-    (set! *forest-cursor* (- *forest-cursor* 1))
-    (when (< *forest-cursor* *forest-window-start*)
-      (set! *forest-window-start* (- *forest-window-start* 1)))))
+  (if (forest-searching?)
+      (let ([n (forest-active-count)])
+        (when (> n 0)
+          (set! *forest-cursor* (forest-wrap (- *forest-cursor* 1) n))
+          (forest-ensure-cursor-visible!)))
+      (forest-cursor-sibling! -1)))
 
 (define (forest-current-entry)
   (if (forest-searching?)
@@ -540,6 +627,57 @@
      event-result/close]
     [else event-result/consume]))
 
+(define (forest-dir-expanded? path)
+  (and (is-dir? path)
+       (hash-contains? *forest-directories* path)
+       (not (hash-try-get *forest-directories* path))))
+
+(define (forest-path-in-workspace? path)
+  (define ws (helix-find-workspace))
+  (or (equal? path ws)
+      (starts-with? path (string-append ws (path-separator)))))
+
+(define (forest-first-child-index path)
+  (let loop ([items *forest-tree*] [i 0])
+    (cond
+      [(null? items) #f]
+      [(equal? (forest-parent-path (car (car items))) path) i]
+      [else (loop (cdr items) (+ i 1))])))
+
+;; expand if needed and move onto the first child
+(define (forest-enter-dir! path)
+  (unless (forest-dir-expanded? path)
+    (forest-toggle-dir! path))
+  (define idx (forest-first-child-index path))
+  (when idx
+    (set! *forest-cursor* idx)
+    (forest-ensure-cursor-visible!)))
+
+(define (forest-enter-or-open!)
+  (define entry (forest-current-entry))
+  (cond
+    [(not entry) event-result/consume]
+    [(is-file? (car entry)) (forest-activate!)]
+    [(is-dir? (car entry))
+     (forest-enter-dir! (car entry))
+     event-result/consume]
+    [else event-result/consume]))
+
+;; leave the current folder collapses it and moves to parent
+(define (forest-goto-parent!)
+  (define entry (forest-current-entry))
+  (when (and entry (not (forest-searching?)))
+    (define path (car entry))
+    (define ws (helix-find-workspace))
+    (cond
+      [(equal? path ws) void]
+      [else
+       (define parent (forest-parent-path path))
+       (when (and (string? parent) (forest-path-in-workspace? parent))
+         (when (and (forest-dir-expanded? parent) (not (equal? parent ws)))
+           (forest-toggle-dir! parent))
+         (forest-seek-file! parent))])))
+
 (define (forest-unfocus!)
   (forest-reset-mouse!)
   (set! *forest-focused* #f))
@@ -557,13 +695,13 @@
   (forest-help-dismiss!)
   (set! *forest-active* #f)
   (set! *forest-focused* #f)
+  (forest-clear-clip!)
   (pop-last-component-by-name! "forest-fg")
   (pop-last-component-by-name! "forest-bg")
   (enqueue-thread-local-callback
    (lambda ()
-     (if (equal? *forest-side* 'right)
-         (set-editor-clip-right! 0)
-         (set-editor-clip-left! 0)))))
+     (forest-clear-clip!)
+     (helix.redraw '()))))
 
 (define (forest-wider!)
   (set! *forest-width* (min *forest-max-width* (+ *forest-width* 2)))
@@ -761,6 +899,8 @@
 ;; panel's left edge is 0 when left else put against the right edge
 (define (forest-panel-x0 rect w)
   (if (equal? *forest-side* 'right) (- (area-width rect) w) 0))
+
+(define (forest-snacks-y0) 1)
 
 (define *forest-query-prefix* "> ")
 
@@ -980,16 +1120,17 @@
   (define w (min *forest-width* (area-width rect)))
   (define h (area-height rect))
   (define x0 (forest-panel-x0 rect w))
-  ;; panel spans only the rows not reserved by the bars
-  (define y0 (forest-reserved-top))
-  (define panel-h (max 1 (- h y0 (forest-reserved-bottom))))
-  ;; native statusline still owns the last row unless moka reserved the bottom
-  (define statusline-rows (if (> (forest-reserved-bottom) 0) 0 1))
-  ;; the list fills from just under the search box down to just above the statusline
-  (set! *forest-visible-height* (max 1 (- panel-h *forest-search-height* statusline-rows)))
-  (if (equal? *forest-side* 'right)
-      (set-editor-clip-right! w)
-      (set-editor-clip-left! w))
+  ;; one blank row above the search box
+  (define y0 (forest-snacks-y0))
+  (define panel-h (max 1 (- h y0)))
+  (set! *forest-visible-height* (max 1 (- panel-h *forest-search-height*)))
+  (if *forest-active*
+      (begin
+        (if (equal? *forest-side* 'right)
+            (set-editor-clip-right! w)
+            (set-editor-clip-left! w))
+        (forest-publish-clip! *forest-side* w))
+      (forest-clear-clip!))
 
   ;; theme components a configured sidebar background tints only these panel
   ;; styles, so the buffer keeps the theme background
@@ -1046,10 +1187,8 @@
 
   (when *forest-show-separator?*
     (define sep-x (if (equal? *forest-side* 'right) (- x0 1) (- (+ x0 w) 1)))
-    ;; runs the full panel height, from the reserved top down to just above the
-    ;; statusline, so it respects moka's bufferline and statusline rows
     (define sep-top y0)
-    (define sep-bottom (- (+ y0 panel-h) statusline-rows 1))
+    (define sep-bottom (- (+ y0 panel-h) 1))
     (when (and (>= sep-x 0) (< sep-x (area-width rect)))
       (let loop ([y sep-top])
         (when (<= y sep-bottom)
@@ -1204,9 +1343,11 @@
 (define (forest-cursor-fn-fg state area)
   (if *forest-typing?*
       (let* ([w (min *forest-width* (area-width area))]
-             [x0 (forest-panel-x0 area w)])
-        (position (+ (forest-reserved-top) 1)
-                  (+ x0 1 (string-length *forest-query-prefix*) (string-length *forest-query*))))
+             [x0 (forest-panel-x0 area w)]
+             [box-x (if (and *forest-show-separator?* (not (equal? *forest-side* 'right)))
+                        (+ x0 1) x0)])
+        (position (+ (forest-snacks-y0) 1)
+                  (+ box-x 1 (string-length *forest-query-prefix*) (string-length *forest-query*))))
       #f))
 
 (define (forest-handle-event-typing state event)
@@ -1234,6 +1375,8 @@
   (cond
     [(equal? action 'down) (forest-cursor-down!) event-result/consume]
     [(equal? action 'up) (forest-cursor-up!) event-result/consume]
+    [(equal? action 'enter) (forest-enter-or-open!)]
+    [(equal? action 'back) (forest-goto-parent!) event-result/consume]
     [(equal? action 'search) (forest-enter-search!) event-result/consume]
     [(equal? action 'create) (forest-prompt-create!) event-result/consume]
     [(equal? action 'rename) (forest-prompt-rename!) event-result/consume]
@@ -1244,7 +1387,7 @@
     [(equal? action 'wider) (forest-wider!) event-result/consume]
     [(equal? action 'narrower) (forest-narrower!) event-result/consume]
     [(equal? action 'menu) (forest-whichkey-open! 'snacks forest-command-action!) event-result/consume]
-    [(equal? action 'quit) (forest-close!) event-result/close]
+    [(equal? action 'quit) (forest-close!) event-result/consume]
     [else event-result/consume]))
 
 (define (forest-handle-event-command state event)
@@ -1252,6 +1395,8 @@
   (cond
     [(key-event-down? event) (forest-cursor-down!) event-result/consume]
     [(key-event-up? event) (forest-cursor-up!) event-result/consume]
+    [(key-event-right? event) (forest-enter-or-open!)]
+    [(key-event-left? event) (forest-goto-parent!) event-result/consume]
     [(key-event-enter? event) (forest-activate!)]
     [(key-event-tab? event)
      (define entry (forest-current-entry))

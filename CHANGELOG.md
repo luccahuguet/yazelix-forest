@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Merge upstream forest.hx 0.1.1, including sibling-wrapping snacks navigation, `h`/`l` folder traversal, sidebar geometry accessors, reserved-bar clipping, and open/close cursor fixes.
+
 ## 0.2.0
 
 - Confine create and rename targets to the workspace and selected parent, including symlink-ancestor checks, exclusive file creation, and exact-destination rename semantics.

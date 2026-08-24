@@ -64,9 +64,10 @@ Bind `:forest-open` to a key, e.g. in `init.scm`:
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` / `j` / `k` | Navigate |
-| `Enter` | Open the selected file, or toggle the selected directory |
-| `Tab` | Toggle the selected directory (outside search) |
+| `↑` / `↓` / `j` / `k` | Navigate within the current folder, wrapping at the ends |
+| `→` / `l` | Enter the selected directory, or open the selected file |
+| `←` / `h` | Leave the current folder and collapse it |
+| `Enter` / `Tab` | Toggle the selected directory (outside search) |
 | `/` | Start typing a fuzzy search query |
 | `n` | Create a file or directory (end name with `/` for a directory) |
 | `r` | Rename the selected entry |
@@ -137,11 +138,11 @@ The regression suite syntax-checks the complete plugin, then exercises its core 
 tests/run.sh
 ```
 
-Set `FOREST_STEEL_BIN` when the exact consumer Steel executable is not named `steel`. Yazelix validates against Steel revision `b67efd5c262962226424148bb87abefaf4109c5a`, embedded in its Helix revision `19b9ac4d`.
+Set `FOREST_STEEL_BIN` when the exact consumer Steel executable is not named `steel`. Yazelix validates against Steel revision `3a418c9ea586c1862a8c3a49d6a998436afc8957`, embedded in its Helix revision `7e6cd307d00783c16ad4cff99ed71936d34f6572`.
 
 ## Fork and dependency policy
 
-- Upstream history begins at forest.hx revision `c487956a8f002813fe44ae2a30fffe1859fcc206`; the upstream MIT license and Raffaele Meo's attribution remain intact.
+- The maintained fork includes forest.hx through release 0.1.1 at `07d74a1f38cbc88e4249869fa4740e568f988e9f`; the upstream MIT license and Raffaele Meo's attribution remain intact.
 - `main` is the accepted fork line. Work uses short-lived `agent/*` branches and reviewable pull requests. Upstream updates are reviewed against the maintained delta before `main` advances.
 - Release tags are immutable. Consumers pin an exact Yazelix Forest release revision rather than a moving branch.
 - Forge resolves [notify.hx](https://github.com/chuwy/notify.hx) at `0a328073e6d3e5041346374ae747c275ab8ce746` and [glyph.hx](https://github.com/Ra77a3l3-jar/glyph.hx) at `1e63ccbc8f17511543412c955879ba672f3f8ec1`. Both are leaf packages with no further dependencies.
