@@ -56,6 +56,9 @@ Bind `:forest-open` to a key, e.g. in `init.scm`:
         (normal (space (e ":forest-open"))))
 ```
 
+An integration can make one native Helix chord toggle both ways, including while
+a Helix picker is open, by also passing it to `(forest-set-toggle-key! "C-y")`.
+
 ---
 
 ## Usage
@@ -132,7 +135,7 @@ Opening the tree reveals whatever file is currently open in the editor, cascadin
 
 ## Native checks
 
-The regression suite syntax-checks the complete plugin, then exercises its core contracts with Steel and isolated temporary workspace, Git, and package roots. It does not read user configuration, reach the network, or leave child processes running.
+The regression suite rejects reintroduction of the deleted `forest-parent-path` wrapper and low-level redraw calls with invalid arguments, syntax-checks the complete plugin, then exercises its core contracts with Steel and isolated temporary workspace, Git, and package roots. It does not read user configuration, reach the network, or leave child processes running.
 
 ```sh
 tests/run.sh

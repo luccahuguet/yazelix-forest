@@ -96,6 +96,7 @@
         'quit "q"))
 
 (define *forest-keybinds* *forest-default-keybinds*)
+(define *forest-toggle-key* #f)
 
 ;; looks up which action (if any) a keypress is bound to
 (define (forest-action-for-char ch)
@@ -111,6 +112,7 @@
 (provide forest-configure!)
 (provide forest-set-style!)
 (provide forest-set-keybinds!)
+(provide forest-set-toggle-key!)
 (provide forest-set-sidebar-bg!)
 (provide forest-set-search-color!)
 (provide forest-snacks-active?)
@@ -141,6 +143,16 @@
           (if (null? ks)
               acc
               (loop (cdr ks) (hash-insert acc (car ks) (hash-try-get overrides (car ks))))))))
+
+;;@doc
+;; Use one Helix-native key chord to toggle forest from either focus owner
+(define (forest-set-toggle-key! key)
+  (set! *forest-toggle-key*
+        (and (string? key) (string->key-event key))))
+
+(define (forest-toggle-event? event)
+  (and *forest-toggle-key*
+       (equal? (event->key-event event) *forest-toggle-key*)))
 
 ;;@doc
 ;; Set which side the file tree renders, hidden entries, and whether a
@@ -501,11 +513,11 @@
   (define entry (forest-current-entry))
   (if (not entry)
       '()
-      (let ([parent (forest-parent-path (car entry))])
+      (let ([parent (parent-name (car entry))])
         (let loop ([items *forest-tree*] [i 0] [acc '()])
           (cond
             [(null? items) (reverse acc)]
-            [(equal? (forest-parent-path (car (car items))) parent)
+            [(equal? (parent-name (car (car items))) parent)
              (loop (cdr items) (+ i 1) (cons i acc))]
             [else (loop (cdr items) (+ i 1) acc)])))))
 
@@ -641,7 +653,7 @@
   (let loop ([items *forest-tree*] [i 0])
     (cond
       [(null? items) #f]
-      [(equal? (forest-parent-path (car (car items))) path) i]
+      [(equal? (parent-name (car (car items))) path) i]
       [else (loop (cdr items) (+ i 1))])))
 
 ;; expand if needed and move onto the first child
@@ -672,7 +684,7 @@
     (cond
       [(equal? path ws) void]
       [else
-       (define parent (forest-parent-path path))
+       (define parent (parent-name path))
        (when (and (string? parent) (forest-path-in-workspace? parent))
          (when (and (forest-dir-expanded? parent) (not (equal? parent ws)))
            (forest-toggle-dir! parent))
@@ -682,10 +694,8 @@
   (forest-reset-mouse!)
   (set! *forest-focused* #f))
 
-;; leaves the tree focused but pops it off the stack, so the editor gets input again
-;; this has to be reachable from inside forest-handle-event-fg directly: while focused,
-;; the fg component owns every keypress, so a global leader keymap like space+e never
-;; reaches Helix's keymap layer to re-invoke forest-open
+;; Switches from outside the foreground component's event handler. Event handlers
+;; unfocus and return event-result/close so Helix pops that component exactly once.
 (define (forest-switch-to-editor!)
   (pop-last-component-by-name! "forest-fg")
   (forest-unfocus!))
@@ -701,15 +711,15 @@
   (enqueue-thread-local-callback
    (lambda ()
      (forest-clear-clip!)
-     (helix.redraw '()))))
+     (helix.redraw))))
 
 (define (forest-wider!)
   (set! *forest-width* (min *forest-max-width* (+ *forest-width* 2)))
-  (helix.redraw '()))
+  (helix.redraw))
 
 (define (forest-narrower!)
   (set! *forest-width* (max *forest-min-width* (- *forest-width* 2)))
-  (helix.redraw '()))
+  (helix.redraw))
 
 (define *forest-modal-open?* #f)
 (define *forest-modal-mode* 'input)
@@ -1298,7 +1308,7 @@
 
 ;; forest-snacks-open! would reveal the current file and move off the clicked row
 ;; deferred since the compositor can't be restacked mid-dispatch
-(define (forest-refocus-from-click!)
+(define (forest-refocus!)
   (unless *forest-focused*
     (set! *forest-focused* #t)
     (enqueue-thread-local-callback
@@ -1309,6 +1319,12 @@
   ;; unfocused, so anything the mouse doesn't claim falls through to the editor
   (define dir (forest-mouse-scroll-direction event))
   (cond
+    [(and (not *forest-focused*) (forest-toggle-event? event))
+     (forest-reset-mouse!)
+     (forest-scan-git-state! (helix-find-workspace))
+     (forest-reveal-current-file!)
+     (forest-refocus!)
+     event-result/consume]
     ;; a key ends any gesture, so a lost release can't leave the panel eating clicks
     [(not (mouse-event? event))
      (forest-reset-mouse!)
@@ -1322,7 +1338,7 @@
          (forest-leave-typing-on-click! event)
          (when (pair? target) (forest-select-clicked! (cadr target)))
          (when (equal? target 'search) (set! *forest-typing?* #t))
-         (forest-refocus-from-click!)))
+         (forest-refocus!)))
      event-result/consume]
     [(not (forest-mouse-in-area? event *forest-hit-panel*)) event-result/ignore]
     [(forest-mouse-left-down? event)
@@ -1331,7 +1347,7 @@
     [dir
      ;; scrolling over the panel reads as inspecting it, not entering it
      (forest-debounce-scroll! (lambda () (forest-scroll-by! dir *forest-scroll-amount*)))
-     (helix.redraw '()) ; unfocused, so consuming alone won't re-render
+     (helix.redraw) ; unfocused, so consuming alone won't re-render
      event-result/consume]
     [else event-result/ignore]))
 
@@ -1341,14 +1357,13 @@
 
 ;; cursor only needs to appear while actively typing a search query
 (define (forest-cursor-fn-fg state area)
-  (if *forest-typing?*
-      (let* ([w (min *forest-width* (area-width area))]
-             [x0 (forest-panel-x0 area w)]
-             [box-x (if (and *forest-show-separator?* (not (equal? *forest-side* 'right)))
-                        (+ x0 1) x0)])
-        (position (+ (forest-snacks-y0) 1)
-                  (+ box-x 1 (string-length *forest-query-prefix*) (string-length *forest-query*))))
-      #f))
+  (let* ([w (min *forest-width* (area-width area))]
+         [x0 (forest-panel-x0 area w)]
+         [box-x (if (and *forest-show-separator?* (not (equal? *forest-side* 'right)))
+                    (+ x0 1) x0)]
+         [pos (position (+ (forest-snacks-y0) 1)
+                        (+ box-x 1 (string-length *forest-query-prefix*) (string-length *forest-query*)))])
+    (if *forest-typing?* pos (list pos 'hidden))))
 
 (define (forest-handle-event-typing state event)
   (define ch (key-event-char event))
@@ -1405,7 +1420,7 @@
      event-result/consume]
 
     [(key-event-escape? event)
-     (forest-switch-to-editor!)
+     (forest-unfocus!)
      event-result/close] ; pops fg only; bg stays visible
 
     [(key-event-backspace? event)
@@ -1442,7 +1457,7 @@
         event-result/consume]
        ;; helix has already spent this event, so it takes another to place the caret
        [else
-        (forest-switch-to-editor!)
+        (forest-unfocus!)
         event-result/close])]
     [dir
      (if (forest-mouse-in-area? event *forest-hit-panel*)
@@ -1458,6 +1473,9 @@
   (cond
     [*forest-modal-open?* event-result/ignore]
     [*forest-help-open?* event-result/ignore]
+    [(forest-toggle-event? event)
+     (forest-unfocus!)
+     event-result/close]
     ;; ahead of the typing branch so the tree stays clickable mid-query
     [(mouse-event? event) (forest-handle-mouse-fg state event)]
     [else
@@ -1471,7 +1489,8 @@
   (new-component! "forest-bg"
                   (ForestBgState)
                   forest-render-bg
-                  (hash "handle_event" forest-handle-event-bg)))
+                  (hash "handle_event" forest-handle-event-bg
+                        "event_priority" #t)))
 
 (define (forest-make-fg-component)
   (new-component! "forest-fg"
@@ -2000,6 +2019,9 @@
     ;; do not register keys when doing new/rename
     [*forest-modal-open?* event-result/ignore]
     [*forest-help-open?* event-result/ignore]
+    [(forest-toggle-event? event)
+     (forest-mini-close!)
+     event-result/close]
     [(mouse-event? event) (forest-mini-handle-mouse state event)]
     [else
      ;; any keypress can move the cursor, so an armed entry stops meaning anything
