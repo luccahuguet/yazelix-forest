@@ -33,5 +33,10 @@ if [ "$(grep -c '(forest-switch-to-editor!)' forest.scm)" -ne 2 ]; then
   echo 'foreground event handlers must let Helix close forest-fg exactly once' >&2
   exit 1
 fi
+if ! sed -n '/^(define (forest-activate!)/,/^(define (forest-dir-expanded?/p' forest.scm |
+  grep -q '(pop-last-component-by-name! "picker")'; then
+  echo 'opening a Forest file must dismiss a covered native picker' >&2
+  exit 1
+fi
 STEEL_HOME="$test_root/steel" "$steel_bin" ast --expanded false --require false forest.scm >/dev/null
 STEEL_HOME="$test_root/steel" "$steel_bin" tests/forest-tests.scm "$test_root/work"

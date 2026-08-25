@@ -635,6 +635,7 @@
      (define path (car entry))
      ;; hand focus to the buffer about to open
      (set! *forest-focused* #f)
+     (pop-last-component-by-name! "picker")
      (enqueue-thread-local-callback (lambda () (helix.open path)))
      event-result/close]
     [else event-result/consume]))
