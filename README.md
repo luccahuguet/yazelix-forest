@@ -58,6 +58,8 @@ Bind `:forest-open` to a key, e.g. in `init.scm`:
 
 An integration can make one native Helix chord toggle both ways, including while
 a Helix picker is open, by also passing it to `(forest-set-toggle-key! "C-y")`.
+Snacks integrations can use `(forest-open #:focused #f)` to show the persistent
+sidebar while leaving an existing editor or picker focused.
 
 ---
 

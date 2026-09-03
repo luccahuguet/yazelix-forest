@@ -1500,11 +1500,11 @@
                   (hash "handle_event" forest-handle-event-fg
                         "cursor" forest-cursor-fn-fg)))
 
-(define (forest-snacks-open!)
+(define (forest-snacks-open! focused?)
   (cond
     [(not *forest-active*)
      (set! *forest-active* #t)
-     (set! *forest-focused* #t)
+     (set! *forest-focused* focused?)
      (set! *forest-cursor* 0)
      (set! *forest-window-start* 0)
      (set! *forest-query* "")
@@ -1513,10 +1513,12 @@
      (forest-scan-git-state! (helix-find-workspace))
      (forest-reveal-current-file!)
      (push-component! (forest-make-bg-component))
-     (push-component! (forest-make-fg-component))]
+     (when focused? (push-component! (forest-make-fg-component)))]
 
     [*forest-focused*
      (forest-switch-to-editor!)]
+
+    [(not focused?) void]
 
     [else
      (set! *forest-focused* #t)
@@ -2043,10 +2045,10 @@
 
 ;;@doc
 ;; Open the file tree
-(define (forest-open)
+(define (forest-open #:focused [focused? #t])
   (if (equal? *forest-style* 'mini)
       (forest-mini-open!)
-      (forest-snacks-open!)))
+      (forest-snacks-open! focused?)))
 
 ;;@doc
 ;; Close the file tree

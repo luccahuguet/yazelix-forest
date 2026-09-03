@@ -25,6 +25,15 @@ if ! grep -q '"event_priority" #t' forest.scm; then
   echo 'the persistent background must receive its focus toggle before native modal components' >&2
   exit 1
 fi
+if ! grep -Fq '(define (forest-open #:focused [focused? #t])' forest.scm; then
+  echo 'forest-open must allow integrations to start snacks without taking focus' >&2
+  exit 1
+fi
+if ! sed -n '/^(define (forest-snacks-open! focused?)/,/^(define \*forest-mini-min-w\*/p' forest.scm |
+  grep -q '(when focused? (push-component! (forest-make-fg-component)))'; then
+  echo 'unfocused snacks startup must leave its foreground component off the stack' >&2
+  exit 1
+fi
 if ! grep -q "(list pos 'hidden)" forest.scm; then
   echo 'focused forest must hide cursors owned by lower modal components' >&2
   exit 1

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Merge upstream forest.hx 0.1.1, including sibling-wrapping snacks navigation, `h`/`l` folder traversal preserved with Steel's native `parent-name`, sidebar geometry accessors, reserved-bar clipping, open/close cursor fixes, single-close focus handoffs that keep the background tree visible, covered native-picker dismissal when Forest opens a file, valid redraws after closing or resizing the sidebar, hidden lower-modal cursors while Forest is focused, and an optional native chord for toggling focus from either side or over a native modal.
+- Merge upstream forest.hx 0.1.1, including sibling-wrapping snacks navigation, `h`/`l` folder traversal preserved with Steel's native `parent-name`, sidebar geometry accessors, reserved-bar clipping, open/close cursor fixes, single-close focus handoffs that keep the background tree visible, optional unfocused startup beside a native modal, covered native-picker dismissal when Forest opens a file, valid redraws after closing or resizing the sidebar, hidden lower-modal cursors while Forest is focused, and an optional native chord for toggling focus from either side or over a native modal.
 
 ## 0.2.0
 
