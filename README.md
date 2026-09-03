@@ -1,6 +1,6 @@
-# forest.hx
+# Yazelix Forest
 
-forest.hx is a file tree explorer for [Helix](https://github.com/helix-editor/helix/), with two selectable styles: `snacks`, a persistent sidebar panel with an integrated fuzzy search bar (default), and `mini`, floating Miller columns with a live preview.
+Yazelix Forest is a maintained fork of [forest.hx](https://github.com/Ra77a3l3-jar/forest.hx). It is a file tree explorer for [Helix](https://github.com/helix-editor/helix/) with two selectable styles: `snacks`, a persistent sidebar panel with an integrated fuzzy search bar (default), and `mini`, floating Miller columns with a live preview.
 
 ### 🍿 `snacks` style
 
@@ -22,7 +22,7 @@ forest.hx is a file tree explorer for [Helix](https://github.com/helix-editor/he
 **2. Install forest.hx via forge:**
 
 ```sh
-forge pkg install --git https://github.com/Ra77a3l3-jar/forest.hx.git
+forge pkg install --git https://github.com/luccahuguet/yazelix-forest.git
 ```
 
 **3. Load the plugin** by adding this to your `init.scm`:
@@ -56,6 +56,11 @@ Bind `:forest-open` to a key, e.g. in `init.scm`:
         (normal (space (e ":forest-open"))))
 ```
 
+An integration can make one native Helix chord toggle both ways, including while
+a Helix picker is open, by also passing it to `(forest-set-toggle-key! "C-y")`.
+Snacks integrations can use `(forest-open #:focused #f)` to show the persistent
+sidebar while leaving an existing editor or picker focused.
+
 ---
 
 ## Usage
@@ -64,15 +69,16 @@ Bind `:forest-open` to a key, e.g. in `init.scm`:
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` / `j` / `k` | Navigate |
-| `Enter` | Open the selected file, or toggle the selected directory |
-| `Tab` | Toggle the selected directory (outside search) |
+| `↑` / `↓` / `j` / `k` | Navigate within the current folder, wrapping at the ends |
+| `→` / `l` | Enter the selected directory, or open the selected file |
+| `←` / `h` | Leave the current folder and collapse it |
+| `Enter` / `Tab` | Toggle the selected directory (outside search) |
 | `/` | Start typing a fuzzy search query |
 | `n` | Create a file or directory (end name with `/` for a directory) |
 | `r` | Rename the selected entry |
 | `d` | Delete the selected entry |
-| `R` | Refresh the tree |
-| `g` | Toggle dotfiles (`.env`, `.git`, etc.) |
+| `R` | Refresh the tree, search inventory, and Git state |
+| `.` | Toggle dotfiles (`.env`, `.git`, etc.) |
 | `i` | Toggle git-ignored entries |
 | `+` / `-` | Widen / narrow the panel |
 | `Space` | Open the which-key menu; press any listed key to run its action (`Esc` dismisses) |
@@ -100,8 +106,8 @@ Opening or refocusing the tree reveals and centers whatever file is currently op
 | `n` | Create a file or directory (end name with `/` for a directory) |
 | `r` | Rename the selected entry |
 | `d` | Delete the selected entry |
-| `R` | Refresh the active column |
-| `g` | Toggle dotfiles (`.env`, `.git`, etc.) |
+| `R` | Refresh the columns and Git state |
+| `.` | Toggle dotfiles (`.env`, `.git`, etc.) |
 | `i` | Toggle git-ignored entries |
 | `+` / `-` | Widen / narrow the columns |
 | `Space` | Open the which-key menu; press any listed key to run its action (`Esc` dismisses) |
@@ -119,8 +125,30 @@ Opening the tree reveals whatever file is currently open in the editor, cascadin
 
 ## Notes
 
-- Press `Space` opens the which-key menu in the bottom right corner, and when pressed any listed key to run its action.
+- Press `Space` to open the which-key menu in the bottom right corner, then press any listed key to run its action.
 - Mouse support needs Helix's own `editor.mouse` left on (it is by default).
 - Two clicks on an entry activate it. They needn't be quick, but a keypress in between cancels.
-- Requires [notify.hx](https://github.com/chuwy/notify.hx) (pulled in automatically as a dependency) for create/rename/delete notifications.
-- Uses [glyph.hx](https://github.com/Ra77a3l3-jar/glyph.hx) for all the diffrent icons.
+- Create paths stay within the canonical workspace, and rename accepts one basename as an exact destination in the selected entry's parent. Traversal, absolute paths, alternate separators, existing targets observed during validation, and symlinked ancestors are rejected.
+- The workspace root remains visible in snacks even when its name matches a visibility filter, and Forest never deletes it.
+- Directory symlinks remain visible, but Forest does not expand or preview their targets. Deleting one removes the link without touching its target. Real child-directory deletion is non-recursive and fails unless the directory is empty.
+- Tree and search visibility share the same explicit-ignore, dotfile, and Git-ignored policy.
+- Search is loaded on demand and visits at most 5,000 directory entries per inventory. This bound keeps live fuzzy matching responsive in large workspaces. Mini previews retain at most 200 lines from the first 64 KiB of a file; binary and unreadable files are not rendered as text.
+- Git state uses NUL-delimited porcelain records, so whitespace, quotes, newlines, and renames remain filename-safe. Conflicts and type changes remain visible through glyph.hx's general modified-file marker. Explicit refresh and successful mutations rescan state without polling.
+
+## Native checks
+
+The regression suite rejects reintroduction of the deleted `forest-parent-path` wrapper and low-level redraw calls with invalid arguments, syntax-checks the complete plugin, then exercises its core contracts with Steel and isolated temporary workspace, Git, and package roots. It does not read user configuration, reach the network, or leave child processes running.
+
+```sh
+tests/run.sh
+```
+
+Set `FOREST_STEEL_BIN` when the exact consumer Steel executable is not named `steel`. Yazelix validates against Steel revision `3a418c9ea586c1862a8c3a49d6a998436afc8957`, embedded in its Helix revision `7e6cd307d00783c16ad4cff99ed71936d34f6572`.
+
+## Fork and dependency policy
+
+- The maintained fork includes forest.hx through release 0.1.1 at `07d74a1f38cbc88e4249869fa4740e568f988e9f`; the upstream MIT license and Raffaele Meo's attribution remain intact.
+- `main` is the accepted fork line. Work uses short-lived `agent/*` branches and reviewable pull requests. Upstream updates are reviewed against the maintained delta before `main` advances.
+- Release tags are immutable. Consumers pin an exact Yazelix Forest release revision rather than a moving branch.
+- Forge resolves [notify.hx](https://github.com/chuwy/notify.hx) at `0a328073e6d3e5041346374ae747c275ab8ce746` and [glyph.hx](https://github.com/Ra77a3l3-jar/glyph.hx) at `1e63ccbc8f17511543412c955879ba672f3f8ec1`. Both are leaf packages with no further dependencies.
+- Forest owns plugin behavior and dependency declarations. A consuming distribution owns its exact Forest pin, Helix/Steel composition, and end-to-end packaging proof.

@@ -6,6 +6,7 @@
 (require (prefix-in helix. "helix/commands.scm"))
 (require "notify/notify.scm")
 (require "glyph/glyph.scm")
+(require "forest/core.scm")
 
 (define (forest-info msg)
   (notify msg #:title "forest.hx"))
@@ -35,66 +36,30 @@
 (define *forest-show-git-ignored* #f)
 (define *forest-git-ignored-set* (hashset))
 
-(define (forest-dotfile? name)
-  (and (> (string-length name) 0) (char=? (string-ref name 0) #\.)))
-
-(define (forest-git-repo? dir)
-  (let ([proc (~> (command "git" (list "-C" dir "rev-parse" "--is-inside-work-tree"))
-                  with-stdout-piped
-                  with-stderr-piped
-                  spawn-process)])
-    (and (Ok? proc)
-         (string=? (trim (read-port-to-string (child-stdout (Ok->value proc)))) "true"))))
-
 (define *forest-git-status-map* (hash))
 
-;; classifies code it modifiles added deleted and renames
-(define (forest-git-status-symbol code)
-  (define x (string-ref code 0))
-  (define y (string-ref code 1))
-  (cond
-    [(and (char=? x #\?) (char=? y #\?)) 'untracked]
-    [(or (char=? x #\A) (char=? y #\A)) 'added]
-    [(or (char=? x #\D) (char=? y #\D)) 'deleted]
-    [(or (char=? x #\R) (char=? y #\R)) 'renamed]
-    [(or (char=? x #\M) (char=? y #\M)) 'modified]
-    [else #f]))
-
-(define (forest-status-path rest)
-  (define parts (split-many rest " -> "))
-  (trim-end-matches (if (> (length parts) 1) (list-ref parts (- (length parts) 1)) rest)
-                     (path-separator)))
-
-(define (forest-parse-git-status-lines lines)
-  (let loop ([ls lines] [ign (hashset)] [statuses (hash)])
-    (if (null? ls)
-        (cons ign statuses)
-        (let ([line (car ls)])
-          (if (< (string-length line) 3)
-              (loop (cdr ls) ign statuses)
-              (let* ([code (substring line 0 2)]
-                     [path (forest-status-path (trim (substring line 3 (string-length line))))])
-                (if (string=? code "!!")
-                    (loop (cdr ls) (hashset-insert ign path) statuses)
-                    (let ([sym (forest-git-status-symbol code)])
-                      (loop (cdr ls) ign (if sym (hash-insert statuses path sym) statuses))))))))))
-
-;; recomputes which workspace-relative paths git considers ignored
-(define (forest-scan-git-ignored! root)
+;; Recomputes ignored and status state from filename-safe porcelain records.
+(define (forest-scan-git-state! root)
   (define parsed
     (with-handler
       (lambda (_) (cons (hashset) (hash)))
-      (if (not (forest-git-repo? root))
-          (cons (hashset) (hash))
-          (let ([proc (~> (command "git" (list "-C" root "status" "--porcelain" "--ignored=matching"))
-                          with-stdout-piped
-                          with-stderr-piped
-                          spawn-process)])
-            (if (Ok? proc)
-                (let* ([output (read-port-to-string (child-stdout (Ok->value proc)))]
-                       [lines (filter (lambda (l) (> (string-length l) 0)) (split-many output "\n"))])
-                  (forest-parse-git-status-lines lines))
-                (cons (hashset) (hash)))))))
+      (let ([proc (~> (command "git" (list "-C" root
+                                           "status"
+                                           "--porcelain=v1"
+                                           "-z"
+                                           "--ignored=matching"
+                                           "--untracked-files=all"))
+                       with-stdout-piped
+                       (with-stderr (open-output-file "/dev/null" #:exists 'append))
+                       spawn-process)])
+        (if (Ok? proc)
+            (let* ([child (Ok->value proc)]
+                   [output (read-port-to-string (child-stdout child))]
+                   [status (wait child)])
+              (if (and (Ok? status) (= (Ok->value status) 0))
+                  (forest-parse-git-status-z output)
+                  (cons (hashset) (hash))))
+            (cons (hashset) (hash))))))
   (set! *forest-git-ignored-set* (car parsed))
   (set! *forest-git-status-map* (cdr parsed)))
 
@@ -108,13 +73,16 @@
 (define *forest-query* "")
 (define *forest-all-files* '())
 (define *forest-search-results* '())
+(define *forest-search-loaded?* #f)
+(define *forest-search-truncated?* #f)
+(define *forest-search-max-entries* 5000)
 (define *forest-typing?* #f)
 
 (define *forest-default-keybinds*
   (hash 'down "j"
         'up "k"
-        'enter "l" ; in mini, in addition to the right arrow/Enter
-        'back "h" ; in mini, addition to the left arrow
+        'enter "l" ; snacks: enter dir or open file; mini: cascade
+        'back "h" ; snacks: leave folder; mini: parent column
         'search "/"
         'create "n"
         'rename "r"
@@ -128,6 +96,7 @@
         'quit "q"))
 
 (define *forest-keybinds* *forest-default-keybinds*)
+(define *forest-toggle-key* #f)
 
 ;; looks up which action (if any) a keypress is bound to
 (define (forest-action-for-char ch)
@@ -143,8 +112,27 @@
 (provide forest-configure!)
 (provide forest-set-style!)
 (provide forest-set-keybinds!)
+(provide forest-set-toggle-key!)
 (provide forest-set-sidebar-bg!)
 (provide forest-set-search-color!)
+(provide forest-snacks-active?)
+(provide forest-snacks-side)
+(provide forest-snacks-width)
+
+;;@doc
+;; true while the snacks sidebar is open, so plugins wont go over sidebar
+(define (forest-snacks-active?)
+  (and *forest-active* (equal? *forest-style* 'snacks)))
+
+;;@doc
+;; Side the snacks sidebar sits on: 'left or 'right
+(define (forest-snacks-side)
+  *forest-side*)
+
+;;@doc
+;; Width in columns of the snacks sidebar, 0 while it is closed
+(define (forest-snacks-width)
+  (if (and *forest-active* (equal? *forest-style* 'snacks)) *forest-width* 0))
 
 ;;@doc
 ;; Override any subset of forest's keybindings from init.scm
@@ -155,6 +143,16 @@
           (if (null? ks)
               acc
               (loop (cdr ks) (hash-insert acc (car ks) (hash-try-get overrides (car ks))))))))
+
+;;@doc
+;; Use one Helix-native key chord to toggle forest from either focus owner
+(define (forest-set-toggle-key! key)
+  (set! *forest-toggle-key*
+        (and (string? key) (string->key-event key))))
+
+(define (forest-toggle-event? event)
+  (and *forest-toggle-key*
+       (equal? (event->key-event event) *forest-toggle-key*)))
 
 ;;@doc
 ;; Set which side the file tree renders, hidden entries, and whether a
@@ -204,7 +202,7 @@
       (or *forest-search-color-focused* (forest-hex->color *forest-search-default-focused*))
       (or *forest-search-color-unfocused* (forest-hex->color *forest-search-default-unfocused*))))
 
-;; keep the panel off the rows moka's bars uses
+;; keep the panel off the rows moka and scopeline reserve
 (define *forest-reserved-top-fn* 'unresolved)
 (define *forest-reserved-bottom-fn* 'unresolved)
 
@@ -215,14 +213,31 @@
 
 (define (forest-reserved-top)
   (forest-resolve-reserved!)
-  (if *forest-reserved-top-fn* (with-handler (lambda (_) 0) (*forest-reserved-top-fn*)) 0))
+  (+ (if *forest-reserved-top-fn* (with-handler (lambda (_) 0) (*forest-reserved-top-fn*)) 0)
+     (with-handler (lambda (_) 0)
+       (let ([v (eval-string "(scopeline-reserved-top)")])
+         (if (number? v) v 0)))))
 
 (define (forest-reserved-bottom)
   (forest-resolve-reserved!)
   (if *forest-reserved-bottom-fn* (with-handler (lambda (_) 0) (*forest-reserved-bottom-fn*)) 0))
 
-(define (forest-take lst n)
-  (if (or (null? lst) (<= n 0)) '() (cons (car lst) (forest-take (cdr lst) (- n 1)))))
+;; tell moka and scopeline where the snacks sidebar is, so their bars stop at the buffer
+;; eval-string so a missing plugin is a no-op instead of a load error
+(define (forest-publish-clip! side w)
+  (define side-expr (if side (string-append "'" (symbol->string side)) "#f"))
+  (define w-expr (number->string (if (number? w) w 0)))
+  (define args (string-append " " side-expr " " w-expr ")"))
+  (with-handler (lambda (_) #f)
+    (eval-string (string-append "(moka-set-forest-clip!" args)))
+  (with-handler (lambda (_) #f)
+    (eval-string (string-append "(scopeline-set-forest-clip!" args))))
+
+(define (forest-clear-clip!)
+  (forest-publish-clip! #f 0)
+  (if (equal? *forest-side* 'right)
+      (set-editor-clip-right! 0)
+      (set-editor-clip-left! 0)))
 
 (define (forest-drop lst n)
   (if (or (null? lst) (<= n 0)) lst (forest-drop (cdr lst) (- n 1))))
@@ -231,9 +246,6 @@
   (if (<= (string-length s) max-w)
       s
       (string-append (substring s 0 (max 0 (- max-w 1))) "…")))
-
-(define (forest-repeat-str s n)
-  (if (<= n 0) "" (string-append s (forest-repeat-str s (- n 1)))))
 
 (struct ForestHelpState ())
 (define *forest-help-open?* #f)
@@ -251,9 +263,10 @@
 ;; snaks keybinds
 (define (forest-snacks-help-rows)
   (list
-   (list (string-append (forest-help-key 'down) " / " (forest-help-key 'up) " / ↑ / ↓") "Navigate")
-   (list "Enter" "Open file or toggle dir")
-   (list "Tab" "Toggle directory")
+    (list (string-append (forest-help-key 'down) " / " (forest-help-key 'up) " / ↑ / ↓") "Navigate in folder")
+    (list (string-append (forest-help-key 'enter) " / →") "Enter dir or open file")
+    (list (string-append (forest-help-key 'back) " / ←") "Leave folder")
+    (list "Enter / Tab" "Toggle directory")
    (list (forest-help-key 'search) "Fuzzy search")
    (list (forest-help-key 'create) "Create file or dir")
    (list (forest-help-key 'rename) "Rename entry")
@@ -375,13 +388,14 @@
 (define (forest-git-status path)
   (hash-try-get *forest-git-status-map* (forest-relpath path)))
 
-(define (forest-searching?) (not (equal? *forest-query* "")))
+(define (forest-visible-path? path)
+  (forest-entry-visible? (file-name path)
+                         *forest-ignore-set*
+                         *forest-show-hidden*
+                         *forest-show-git-ignored*
+                         (forest-git-ignored? path)))
 
-;; dirs before files, alphabetic oder
-(define (forest-sort-entries lst)
-  (define dirs (sort (filter is-dir? lst) string<?))
-  (define files (sort (filter (lambda (p) (not (is-dir? p))) lst) string<?))
-  (append dirs files))
+(define (forest-searching?) (not (equal? *forest-query* "")))
 
 (define (forest-dir-marker path)
   (if (hash-contains? *forest-directories* path)
@@ -390,29 +404,23 @@
 
 (define (forest-build-tree!)
   (define result '())
-  (define (walk path depth)
-    (define name (file-name path))
-    (unless (or (hashset-contains? *forest-ignore-set* name)
-                (and (not *forest-show-hidden*) (forest-dotfile? name))
-                (and (not *forest-show-git-ignored*) (forest-git-ignored? path)))
-      (define indent (forest-repeat-str "  " depth))
-      (define marker (if (is-dir? path) (forest-dir-marker path) "  "))
-      (set! result (cons (list path indent marker name) result))
-      (when (is-dir? path)
+  (define (walk entry depth)
+    (define path (car entry))
+    (define name (cadr entry))
+    (define directory? (list-ref entry 2))
+    (when (or (= depth 0) (forest-visible-path? path))
+      (define indent (make-string (* 2 depth) #\space))
+      (define marker (if directory? (forest-dir-marker path) "  "))
+      (set! result (cons (list path indent marker name directory?) result))
+      (when directory?
         (unless (hash-contains? *forest-directories* path)
           (set! *forest-directories* (hash-insert *forest-directories* path (> depth 0))))
         (unless (hash-try-get *forest-directories* path)
           (for-each (lambda (child) (walk child (+ depth 1)))
-                    (forest-sort-entries (read-dir path)))))))
-  (walk (helix-find-workspace) 0)
+                    (forest-read-directory path))))))
+  (define workspace (helix-find-workspace))
+  (walk (list workspace (file-name workspace) #t) 0)
   (set! *forest-tree* (reverse result)))
-
-(define (forest-parent-path path)
-  (trim-end-matches path (string-append (path-separator) (file-name path))))
-
-(define (forest-half-floor n)
-  (let loop ([n n] [h 0])
-    (if (< n 2) h (loop (- n 2) (+ h 1)))))
 
 ;; marks every old dir between the workspace root and path as open
 (define (forest-open-ancestors-for-file! path)
@@ -422,7 +430,7 @@
              (>= (string-length path) (string-length ws-prefix))
              (equal? (substring path 0 (string-length ws-prefix)) ws-prefix))
     (define (open-up! p)
-      (define parent (forest-parent-path p))
+      (define parent (parent-name p))
       (set! *forest-directories* (hash-insert *forest-directories* parent #f))
       (unless (equal? parent ws)
         (open-up! parent)))
@@ -439,50 +447,103 @@
     (when idx
       (set! *forest-cursor* idx)
       (set! *forest-window-start*
-            (max 0 (- idx (forest-half-floor *forest-visible-height*)))))))
+            (max 0 (- idx (quotient *forest-visible-height* 2)))))))
 
 (define (forest-reveal-current-file!)
   (define path (editor-document->path (editor->doc-id (editor-focus))))
   (forest-open-ancestors-for-file! path)
   (forest-build-tree!)
   (unless (forest-searching?)
-    (forest-seek-file! path)))
+    (forest-seek-file! path))
+  ;; workspace row is only a parent, start on its first child so j/k work immediately
+  (let ([entry (forest-current-entry)])
+    (when (and entry (equal? (car entry) (helix-find-workspace)))
+      (forest-enter-dir! (car entry)))))
 
-;; flat recursive file list for search
-;; searches files indepedent of the fold state
+;; Flat recursive file list for search, independent of fold state. It is loaded
+;; only when search starts and bounded by directory entries visited.
 (define (forest-scan-files!)
   (define root (helix-find-workspace))
   (define root-prefix (string-append root (path-separator)))
-  (define acc '())
-  (define (walk dir)
-    (for-each
-     (lambda (p)
-       (define name (file-name p))
-       (unless (hashset-contains? *forest-ignore-set* name)
-         (if (is-dir? p)
-             (walk p)
-             (set! acc (cons p acc)))))
-     (with-handler (lambda (_) '()) (read-dir dir))))
-  (walk root)
+  (define scan
+    (forest-scan-files-bounded root
+                               (lambda (path _name) (forest-visible-path? path))
+                               *forest-search-max-entries*))
   (set! *forest-all-files*
-        (sort (map (lambda (p) (substring p (string-length root-prefix) (string-length p))) acc)
-              string<?)))
+        (map (lambda (p) (substring p (string-length root-prefix) (string-length p)))
+             (list-ref scan 0)))
+  (set! *forest-search-truncated?* (list-ref scan 1))
+  (set! *forest-search-loaded?* #t)
+  (when *forest-search-truncated?*
+    (forest-info (string-append "forest: search limited to "
+                                (number->string *forest-search-max-entries*)
+                                " entries"))))
+
+(define (forest-invalidate-search!)
+  (set! *forest-all-files* '())
+  (set! *forest-search-results* '())
+  (set! *forest-search-loaded?* #f)
+  (set! *forest-search-truncated?* #f))
 
 (define (forest-active-count)
   (if (forest-searching?) (length *forest-search-results*) (length *forest-tree*)))
 
+(define (forest-index-of lst x)
+  (let loop ([xs lst] [i 0])
+    (cond
+      [(null? xs) #f]
+      [(equal? (car xs) x) i]
+      [else (loop (cdr xs) (+ i 1))])))
+
+(define (forest-wrap i n)
+  (cond
+    [(< i 0) (- n 1)]
+    [(>= i n) 0]
+    [else i]))
+
+(define (forest-ensure-cursor-visible!)
+  (define last-vis (+ *forest-window-start* (- *forest-visible-height* 1)))
+  (when (> *forest-cursor* last-vis)
+    (set! *forest-window-start* (- *forest-cursor* (- *forest-visible-height* 1))))
+  (when (< *forest-cursor* *forest-window-start*)
+    (set! *forest-window-start* *forest-cursor*)))
+
+;; indices of entries that share the current entry's parent
+(define (forest-sibling-indices)
+  (define entry (forest-current-entry))
+  (if (not entry)
+      '()
+      (let ([parent (parent-name (car entry))])
+        (let loop ([items *forest-tree*] [i 0] [acc '()])
+          (cond
+            [(null? items) (reverse acc)]
+            [(equal? (parent-name (car (car items))) parent)
+             (loop (cdr items) (+ i 1) (cons i acc))]
+            [else (loop (cdr items) (+ i 1) acc)])))))
+
+(define (forest-cursor-sibling! delta)
+  (define idxs (forest-sibling-indices))
+  (define n (length idxs))
+  (define pos (forest-index-of idxs *forest-cursor*))
+  (when (and (> n 0) pos)
+    (set! *forest-cursor* (list-ref idxs (forest-wrap (+ pos delta) n)))
+    (forest-ensure-cursor-visible!)))
+
 (define (forest-cursor-down!)
-  (define n (forest-active-count))
-  (when (< *forest-cursor* (- n 1))
-    (set! *forest-cursor* (+ *forest-cursor* 1))
-    (when (> *forest-cursor* (+ *forest-window-start* (- *forest-visible-height* 1)))
-      (set! *forest-window-start* (+ *forest-window-start* 1)))))
+  (if (forest-searching?)
+      (let ([n (forest-active-count)])
+        (when (> n 0)
+          (set! *forest-cursor* (forest-wrap (+ *forest-cursor* 1) n))
+          (forest-ensure-cursor-visible!)))
+      (forest-cursor-sibling! 1)))
 
 (define (forest-cursor-up!)
-  (when (> *forest-cursor* 0)
-    (set! *forest-cursor* (- *forest-cursor* 1))
-    (when (< *forest-cursor* *forest-window-start*)
-      (set! *forest-window-start* (- *forest-window-start* 1)))))
+  (if (forest-searching?)
+      (let ([n (forest-active-count)])
+        (when (> n 0)
+          (set! *forest-cursor* (forest-wrap (- *forest-cursor* 1) n))
+          (forest-ensure-cursor-visible!)))
+      (forest-cursor-sibling! -1)))
 
 (define (forest-current-entry)
   (if (forest-searching?)
@@ -491,6 +552,9 @@
              (cons (string-append (helix-find-workspace) (path-separator) rel) rel)))
       (and (not (null? *forest-tree*))
            (list-ref *forest-tree* *forest-cursor*))))
+
+(define (forest-current-entry-directory? entry)
+  (and (not (forest-searching?)) (list-ref entry 4)))
 
 (define (forest-refresh-search!)
   (set! *forest-search-results*
@@ -514,6 +578,7 @@
 (define (forest-enter-search!)
   (set! *forest-typing?* #t)
   (set! *forest-query* "")
+  (unless *forest-search-loaded?* (forest-scan-files!))
   (forest-refresh-search!)
   (set! *forest-cursor* 0)
   (set! *forest-window-start* 0))
@@ -524,17 +589,19 @@
   (set! *forest-cursor* 0)
   (set! *forest-window-start* 0))
 
-;; refreshes the view after an eaction like deletion
+;; refreshes the view after an action like deletion
 (define (forest-refresh-all!)
   (define old *forest-cursor*)
+  (forest-scan-git-state! (helix-find-workspace))
   (forest-build-tree!)
-  (forest-scan-files!)
+  (forest-invalidate-search!)
+  (when (forest-searching?) (forest-scan-files!))
   (forest-refresh-search!)
   (set! *forest-cursor* (min old (max 0 (- (forest-active-count) 1)))))
 
 (define *forest-refresh-mini-fn* #f)
 
-;; refreshes whichever style is active immediatelly
+;; refreshes whichever style is active immediately
 (define (forest-refresh-current-style!)
   (if (and (equal? *forest-style* 'mini) *forest-refresh-mini-fn*)
       (*forest-refresh-mini-fn*)
@@ -561,24 +628,75 @@
   (define entry (forest-current-entry))
   (cond
     [(not entry) event-result/consume]
+    [(forest-current-entry-directory? entry)
+     (forest-toggle-dir! (car entry))
+     event-result/consume]
     [(is-file? (car entry))
      (define path (car entry))
      ;; hand focus to the buffer about to open
      (set! *forest-focused* #f)
+     (pop-last-component-by-name! "picker")
      (enqueue-thread-local-callback (lambda () (helix.open path)))
      event-result/close]
+    [else event-result/consume]))
+
+(define (forest-dir-expanded? path)
+  (and (is-dir? path)
+       (hash-contains? *forest-directories* path)
+       (not (hash-try-get *forest-directories* path))))
+
+(define (forest-path-in-workspace? path)
+  (define ws (helix-find-workspace))
+  (or (equal? path ws)
+      (starts-with? path (string-append ws (path-separator)))))
+
+(define (forest-first-child-index path)
+  (let loop ([items *forest-tree*] [i 0])
+    (cond
+      [(null? items) #f]
+      [(equal? (parent-name (car (car items))) path) i]
+      [else (loop (cdr items) (+ i 1))])))
+
+;; expand if needed and move onto the first child
+(define (forest-enter-dir! path)
+  (unless (forest-dir-expanded? path)
+    (forest-toggle-dir! path))
+  (define idx (forest-first-child-index path))
+  (when idx
+    (set! *forest-cursor* idx)
+    (forest-ensure-cursor-visible!)))
+
+(define (forest-enter-or-open!)
+  (define entry (forest-current-entry))
+  (cond
+    [(not entry) event-result/consume]
+    [(is-file? (car entry)) (forest-activate!)]
     [(is-dir? (car entry))
-     (forest-toggle-dir! (car entry))
-     event-result/consume]))
+     (forest-enter-dir! (car entry))
+     event-result/consume]
+    [else event-result/consume]))
+
+;; leave the current folder collapses it and moves to parent
+(define (forest-goto-parent!)
+  (define entry (forest-current-entry))
+  (when (and entry (not (forest-searching?)))
+    (define path (car entry))
+    (define ws (helix-find-workspace))
+    (cond
+      [(equal? path ws) void]
+      [else
+       (define parent (parent-name path))
+       (when (and (string? parent) (forest-path-in-workspace? parent))
+         (when (and (forest-dir-expanded? parent) (not (equal? parent ws)))
+           (forest-toggle-dir! parent))
+         (forest-seek-file! parent))])))
 
 (define (forest-unfocus!)
   (forest-reset-mouse!)
   (set! *forest-focused* #f))
 
-;; leaves the tree focused but pops it off the stack, so the editor gets input again
-;; this has to be reachable from inside forest-handle-event-fg directly: while focused,
-;; the fg component owns every keypress, so a global leader keymap like space+e never
-;; reaches Helix's keymap layer to re-invoke forest-open
+;; Switches from outside the foreground component's event handler. Event handlers
+;; unfocus and return event-result/close so Helix pops that component exactly once.
 (define (forest-switch-to-editor!)
   (pop-last-component-by-name! "forest-fg")
   (forest-unfocus!))
@@ -588,21 +706,21 @@
   (forest-help-dismiss!)
   (set! *forest-active* #f)
   (set! *forest-focused* #f)
+  (forest-clear-clip!)
   (pop-last-component-by-name! "forest-fg")
   (pop-last-component-by-name! "forest-bg")
   (enqueue-thread-local-callback
    (lambda ()
-     (if (equal? *forest-side* 'right)
-         (set-editor-clip-right! 0)
-         (set-editor-clip-left! 0)))))
+     (forest-clear-clip!)
+     (helix.redraw))))
 
 (define (forest-wider!)
   (set! *forest-width* (min *forest-max-width* (+ *forest-width* 2)))
-  (helix.redraw '()))
+  (helix.redraw))
 
 (define (forest-narrower!)
   (set! *forest-width* (max *forest-min-width* (- *forest-width* 2)))
-  (helix.redraw '()))
+  (helix.redraw))
 
 (define *forest-modal-open?* #f)
 (define *forest-modal-mode* 'input)
@@ -689,116 +807,111 @@
                    (hash "handle_event" forest-modal-handle-event
                          "cursor" forest-modal-cursor-fn))))
 
-;; shells out to mv mkdir since steel has no rename builtin
-(define (forest-run-mv! from-path to-path)
-  (let ([proc (~> (command "mv" (list from-path to-path))
-                  with-stdout-piped
-                  with-stderr-piped
-                  spawn-process)])
-    (if (Ok? proc)
-        (let ([stderr (read-port-to-string (child-stderr (Ok->value proc)))])
-          (when (not (string=? (trim stderr) ""))
-            (error (trim stderr))))
-        (error "mv: could not spawn process"))))
+;; Runs POSIX mutations while retaining their failure output for notifications.
+(define (forest-run-command! program args)
+  (define proc (~> (command program args) with-stderr-piped spawn-process))
+  (unless (Ok? proc)
+    (error (string-append program ": could not spawn process")))
+  (define child (Ok->value proc))
+  (define stderr (trim (read-port-to-string (child-stderr child))))
+  (define status (wait child))
+  (unless (and (Ok? status) (= (Ok->value status) 0))
+    (error (if (string=? stderr "") (string-append program " failed") stderr))))
 
-(define (forest-run-mkdir-p! path)
-  (let ([proc (~> (command "mkdir" (list "-p" path))
-                  with-stdout-piped
-                  with-stderr-piped
-                  spawn-process)])
-    (if (Ok? proc)
-        (let ([stderr (read-port-to-string (child-stderr (Ok->value proc)))])
-          (when (not (string=? (trim stderr) ""))
-            (error (trim stderr))))
-        (error "mkdir: could not spawn process"))))
+(define (forest-prompt-create-at! base refresh!)
+  (enqueue-thread-local-callback
+   (lambda ()
+     (forest-show-modal!
+      'input
+      (string-append "New (end with " (path-separator) " for dir): ")
+      (forest-relpath base)
+      (lambda (name)
+        (with-handler
+          (lambda (err) (forest-error (string-append "create failed: " (error-object-message err))))
+          (begin
+            (define target (forest-confined-create-path (helix-find-workspace) name))
+            (define full (car target))
+            (forest-run-command! "mkdir" (list "-p" (parent-name full)))
+            (if (cdr target)
+                (forest-run-command! "mkdir" (list full))
+                (begin
+                  (call-with-output-file full (lambda (_) void))
+                  (helix.open full)))
+            (forest-info (string-append "created " name))
+            (enqueue-thread-local-callback refresh!))))))))
 
-(define (forest-run-touch! path)
-  (let ([proc (~> (command "touch" (list path))
-                  with-stdout-piped
-                  with-stderr-piped
-                  spawn-process)])
-    (if (Ok? proc)
-        (let ([stderr (read-port-to-string (child-stderr (Ok->value proc)))])
-          (when (not (string=? (trim stderr) ""))
-            (error (trim stderr))))
-        (error "touch: could not spawn process"))))
+(define (forest-prompt-rename-entry! entry refresh!)
+  (define path (car entry))
+  (define name (file-name path))
+  (enqueue-thread-local-callback
+   (lambda ()
+     (forest-show-modal!
+      'input
+      "Rename: "
+      name
+      (lambda (new-name)
+        (when (and (not (equal? new-name "")) (not (equal? new-name name)))
+          (with-handler
+            (lambda (err) (forest-error (string-append "rename failed: " (error-object-message err))))
+            (begin
+              (define target (forest-confined-rename-path (helix-find-workspace) path new-name))
+              (rename-file-or-directory! path target)
+              (forest-info (string-append "renamed " name " -> " new-name))
+              (enqueue-thread-local-callback refresh!)))))))))
+
+(define (forest-prompt-delete-entry! entry refresh!)
+  (define path (car entry))
+  (define name (file-name path))
+  (define kind
+    (cond
+      [(forest-path-entry-symlink? path) "symbolic link"]
+      [(is-dir? path) "directory"]
+      [else "file"]))
+  (enqueue-thread-local-callback
+   (lambda ()
+     (forest-show-modal!
+      'confirm
+      (string-append "Delete " kind " '" name "'? (y/N) ")
+      ""
+      (lambda (confirmed?)
+        (when confirmed?
+          (with-handler
+            (lambda (err) (forest-error (string-append "delete failed: " (error-object-message err))))
+            (begin
+              (if (and (is-dir? path) (not (forest-path-entry-symlink? path)))
+                  (forest-run-command! "rmdir" (list path))
+                  (delete-file! path))
+              (forest-info (string-append "deleted " name))
+              (enqueue-thread-local-callback refresh!)))))))))
 
 (define (forest-prompt-create!)
   (define entry (forest-current-entry))
   (when entry
     (define path (car entry))
-    (define base (if (is-dir? path)
-                      (string-append path (path-separator))
-                      (trim-end-matches path (file-name path))))
-    (enqueue-thread-local-callback
-     (lambda ()
-       (forest-show-modal!
-        'input
-        (string-append "New (end with " (path-separator) " for dir): ")
-        (forest-relpath base)
-        (lambda (name)
-          (define full (string-append (helix-find-workspace) (path-separator) name))
-          (with-handler
-            (lambda (err) (forest-error (string-append "create failed: " (error-object-message err))))
-            (begin
-              (if (ends-with? name (path-separator))
-                  (forest-run-mkdir-p! full)
-                  (begin
-                    (forest-run-mkdir-p! (forest-parent-path full))
-                    (forest-run-touch! full)
-                    (helix.open full)))
-              (forest-info (string-append "created " name))))
-          (enqueue-thread-local-callback forest-refresh-all!)))))))
+    (forest-prompt-create-at!
+     (if (forest-current-entry-directory? entry)
+         (string-append path (path-separator))
+         (string-append (parent-name path) (path-separator)))
+     forest-refresh-all!)))
 
 (define (forest-prompt-rename!)
   (define entry (forest-current-entry))
-  (when entry
-    (define path (car entry))
-    (define name (file-name path))
-    (define dir (trim-end-matches path (string-append (path-separator) name)))
-    (enqueue-thread-local-callback
-     (lambda ()
-       (forest-show-modal!
-        'input
-        "Rename: "
-        name
-        (lambda (new-name)
-          (when (and (not (equal? new-name "")) (not (equal? new-name name)))
-            (with-handler
-              (lambda (err) (forest-error (string-append "rename failed: " (error-object-message err))))
-              (begin
-                (forest-run-mv! path (string-append dir (path-separator) new-name))
-                (forest-info (string-append "renamed " name " -> " new-name))))
-            (enqueue-thread-local-callback forest-refresh-all!))))))))
+  (when entry (forest-prompt-rename-entry! entry forest-refresh-all!)))
 
 (define (forest-prompt-delete!)
   (define entry (forest-current-entry))
   (when entry
-    (define path (car entry))
-    (define name (file-name path))
-    (define kind (if (is-dir? path) "directory" "file"))
-    (enqueue-thread-local-callback
-     (lambda ()
-       (forest-show-modal!
-        'confirm
-        (string-append "Delete " kind " '" name "'? (y/N) ")
-        ""
-        (lambda (confirmed?)
-          (when confirmed?
-            (with-handler
-              (lambda (err) (forest-error (string-append "delete failed: " (error-object-message err))))
-              (begin
-                (if (is-dir? path)
-                    (delete-directory! path) ; only works if empty
-                    (delete-file! path))
-                (forest-info (string-append "deleted " name))))
-            (enqueue-thread-local-callback forest-refresh-all!))))))))
+    (if (equal? (car entry) (helix-find-workspace))
+        (forest-error "delete failed: workspace root is protected")
+        (forest-prompt-delete-entry! entry forest-refresh-all!))))
 
 (struct ForestBgState ())
 
 ;; panel's left edge is 0 when left else put against the right edge
 (define (forest-panel-x0 rect w)
   (if (equal? *forest-side* 'right) (- (area-width rect) w) 0))
+
+(define (forest-snacks-y0) 1)
 
 (define *forest-query-prefix* "> ")
 
@@ -857,7 +970,7 @@
         (let* ([name (car items)]
                [val (hash-try-get node name)]
                [dir? (hash? val)]
-               [own (forest-repeat-str "  " depth)]
+               [own (make-string (* 2 depth) #\space)]
                [rel (if (equal? path "") name (string-append path (path-separator) name))]
                [entry (list own dir? name rel)])
           (append (list entry)
@@ -1018,16 +1131,17 @@
   (define w (min *forest-width* (area-width rect)))
   (define h (area-height rect))
   (define x0 (forest-panel-x0 rect w))
-  ;; panel spans only the rows not reserved by the bars
-  (define y0 (forest-reserved-top))
-  (define panel-h (max 1 (- h y0 (forest-reserved-bottom))))
-  ;; native statusline still owns the last row unless moka reserved the bottom
-  (define statusline-rows (if (> (forest-reserved-bottom) 0) 0 1))
-  ;; the list fills from just under the search box down to just above the statusline
-  (set! *forest-visible-height* (max 1 (- panel-h *forest-search-height* statusline-rows)))
-  (if (equal? *forest-side* 'right)
-      (set-editor-clip-right! w)
-      (set-editor-clip-left! w))
+  ;; one blank row above the search box
+  (define y0 (forest-snacks-y0))
+  (define panel-h (max 1 (- h y0)))
+  (set! *forest-visible-height* (max 1 (- panel-h *forest-search-height*)))
+  (if *forest-active*
+      (begin
+        (if (equal? *forest-side* 'right)
+            (set-editor-clip-right! w)
+            (set-editor-clip-left! w))
+        (forest-publish-clip! *forest-side* w))
+      (forest-clear-clip!))
 
   ;; theme components a configured sidebar background tints only these panel
   ;; styles, so the buffer keeps the theme background
@@ -1084,10 +1198,8 @@
 
   (when *forest-show-separator?*
     (define sep-x (if (equal? *forest-side* 'right) (- x0 1) (- (+ x0 w) 1)))
-    ;; runs the full panel height, from the reserved top down to just above the
-    ;; statusline, so it respects moka's bufferline and statusline rows
     (define sep-top y0)
-    (define sep-bottom (- (+ y0 panel-h) statusline-rows 1))
+    (define sep-bottom (- (+ y0 panel-h) 1))
     (when (and (>= sep-x 0) (< sep-x (area-width rect)))
       (let loop ([y sep-top])
         (when (<= y sep-bottom)
@@ -1115,8 +1227,8 @@
                  [total-rows (length rows)]
                  [window-start (max 0 (min (max 0 (- total-rows *forest-visible-height*))
                                             (or *forest-click-window*
-                                                (max 0 (- selected-row (forest-half-floor *forest-visible-height*))))))]
-                 [visible (forest-take (forest-drop rows window-start) *forest-visible-height*)])
+                                                (max 0 (- selected-row (quotient *forest-visible-height* 2))))))]
+                 [visible (take (forest-drop rows window-start) *forest-visible-height*)])
             ;; headings aren't selectable, so they record #f and a click does nothing
             (set! *forest-hit-window* window-start)
             (set! *forest-hit-rows*
@@ -1155,8 +1267,8 @@
                     (forest-render-name-hl frame name-x y name avail row-style (forest-match-style row-style) positions)
                     (frame-set-string! frame name-x y (forest-truncate name avail) row-style))
                 (loop (cdr items) (+ row 1))))))
-      (let ([visible (forest-take (forest-drop *forest-tree* *forest-window-start*)
-                                   *forest-visible-height*)])
+      (let ([visible (take (forest-drop *forest-tree* *forest-window-start*)
+                            *forest-visible-height*)])
         (set! *forest-hit-rows*
               (let loop ([items visible] [i *forest-window-start*])
                 (if (null? items) '() (cons i (loop (cdr items) (+ i 1))))))
@@ -1169,7 +1281,7 @@
             (define marker (list-ref entry 2))
             (define name (list-ref entry 3))
             (define prefix (string-append indent marker))
-            (define dir? (is-dir? path))
+            (define dir? (list-ref entry 4))
             (define icon (if dir? (glyph-dir-icon name) (glyph-icon name)))
             (define icon-color (if dir? (glyph-dir-color name) (glyph-color name)))
             (define git-status (and (not dir?) (forest-git-status path)))
@@ -1197,7 +1309,7 @@
 
 ;; forest-snacks-open! would reveal the current file and move off the clicked row
 ;; deferred since the compositor can't be restacked mid-dispatch
-(define (forest-refocus-from-click!)
+(define (forest-refocus!)
   (unless *forest-focused*
     (set! *forest-focused* #t)
     (enqueue-thread-local-callback
@@ -1208,6 +1320,12 @@
   ;; unfocused, so anything the mouse doesn't claim falls through to the editor
   (define dir (forest-mouse-scroll-direction event))
   (cond
+    [(and (not *forest-focused*) (forest-toggle-event? event))
+     (forest-reset-mouse!)
+     (forest-scan-git-state! (helix-find-workspace))
+     (forest-reveal-current-file!)
+     (forest-refocus!)
+     event-result/consume]
     ;; a key ends any gesture, so a lost release can't leave the panel eating clicks
     [(not (mouse-event? event))
      (forest-reset-mouse!)
@@ -1221,7 +1339,7 @@
          (forest-leave-typing-on-click! event)
          (when (pair? target) (forest-select-clicked! (cadr target)))
          (when (equal? target 'search) (set! *forest-typing?* #t))
-         (forest-refocus-from-click!)))
+         (forest-refocus!)))
      event-result/consume]
     [(not (forest-mouse-in-area? event *forest-hit-panel*)) event-result/ignore]
     [(forest-mouse-left-down? event)
@@ -1230,7 +1348,7 @@
     [dir
      ;; scrolling over the panel reads as inspecting it, not entering it
      (forest-debounce-scroll! (lambda () (forest-scroll-by! dir *forest-scroll-amount*)))
-     (helix.redraw '()) ; unfocused, so consuming alone won't re-render
+     (helix.redraw) ; unfocused, so consuming alone won't re-render
      event-result/consume]
     [else event-result/ignore]))
 
@@ -1240,12 +1358,13 @@
 
 ;; cursor only needs to appear while actively typing a search query
 (define (forest-cursor-fn-fg state area)
-  (if *forest-typing?*
-      (let* ([w (min *forest-width* (area-width area))]
-             [x0 (forest-panel-x0 area w)])
-        (position (+ (forest-reserved-top) 1)
-                  (+ x0 1 (string-length *forest-query-prefix*) (string-length *forest-query*))))
-      #f))
+  (let* ([w (min *forest-width* (area-width area))]
+         [x0 (forest-panel-x0 area w)]
+         [box-x (if (and *forest-show-separator?* (not (equal? *forest-side* 'right)))
+                    (+ x0 1) x0)]
+         [pos (position (+ (forest-snacks-y0) 1)
+                        (+ box-x 1 (string-length *forest-query-prefix*) (string-length *forest-query*)))])
+    (if *forest-typing?* pos (list pos 'hidden))))
 
 (define (forest-handle-event-typing state event)
   (define ch (key-event-char event))
@@ -1272,6 +1391,8 @@
   (cond
     [(equal? action 'down) (forest-cursor-down!) event-result/consume]
     [(equal? action 'up) (forest-cursor-up!) event-result/consume]
+    [(equal? action 'enter) (forest-enter-or-open!)]
+    [(equal? action 'back) (forest-goto-parent!) event-result/consume]
     [(equal? action 'search) (forest-enter-search!) event-result/consume]
     [(equal? action 'create) (forest-prompt-create!) event-result/consume]
     [(equal? action 'rename) (forest-prompt-rename!) event-result/consume]
@@ -1282,7 +1403,7 @@
     [(equal? action 'wider) (forest-wider!) event-result/consume]
     [(equal? action 'narrower) (forest-narrower!) event-result/consume]
     [(equal? action 'menu) (forest-whichkey-open! 'snacks forest-command-action!) event-result/consume]
-    [(equal? action 'quit) (forest-close!) event-result/close]
+    [(equal? action 'quit) (forest-close!) event-result/consume]
     [else event-result/consume]))
 
 (define (forest-handle-event-command state event)
@@ -1290,14 +1411,17 @@
   (cond
     [(key-event-down? event) (forest-cursor-down!) event-result/consume]
     [(key-event-up? event) (forest-cursor-up!) event-result/consume]
+    [(key-event-right? event) (forest-enter-or-open!)]
+    [(key-event-left? event) (forest-goto-parent!) event-result/consume]
     [(key-event-enter? event) (forest-activate!)]
     [(key-event-tab? event)
      (define entry (forest-current-entry))
-     (when (and entry (is-dir? (car entry))) (forest-toggle-dir! (car entry)))
+     (when (and entry (forest-current-entry-directory? entry))
+       (forest-toggle-dir! (car entry)))
      event-result/consume]
 
     [(key-event-escape? event)
-     (forest-switch-to-editor!)
+     (forest-unfocus!)
      event-result/close] ; pops fg only; bg stays visible
 
     [(key-event-backspace? event)
@@ -1334,7 +1458,7 @@
         event-result/consume]
        ;; helix has already spent this event, so it takes another to place the caret
        [else
-        (forest-switch-to-editor!)
+        (forest-unfocus!)
         event-result/close])]
     [dir
      (if (forest-mouse-in-area? event *forest-hit-panel*)
@@ -1350,6 +1474,9 @@
   (cond
     [*forest-modal-open?* event-result/ignore]
     [*forest-help-open?* event-result/ignore]
+    [(forest-toggle-event? event)
+     (forest-unfocus!)
+     event-result/close]
     ;; ahead of the typing branch so the tree stays clickable mid-query
     [(mouse-event? event) (forest-handle-mouse-fg state event)]
     [else
@@ -1363,7 +1490,8 @@
   (new-component! "forest-bg"
                   (ForestBgState)
                   forest-render-bg
-                  (hash "handle_event" forest-handle-event-bg)))
+                  (hash "handle_event" forest-handle-event-bg
+                        "event_priority" #t)))
 
 (define (forest-make-fg-component)
   (new-component! "forest-fg"
@@ -1372,28 +1500,29 @@
                   (hash "handle_event" forest-handle-event-fg
                         "cursor" forest-cursor-fn-fg)))
 
-(define (forest-snacks-open!)
+(define (forest-snacks-open! focused?)
   (cond
     [(not *forest-active*)
      (set! *forest-active* #t)
-     (set! *forest-focused* #t)
+     (set! *forest-focused* focused?)
      (set! *forest-cursor* 0)
      (set! *forest-window-start* 0)
      (set! *forest-query* "")
-     (set! *forest-search-results* '())
+     (forest-invalidate-search!)
      (set! *forest-typing?* #f)
-     (forest-scan-git-ignored! (helix-find-workspace))
+     (forest-scan-git-state! (helix-find-workspace))
      (forest-reveal-current-file!)
-     (forest-scan-files!)
      (push-component! (forest-make-bg-component))
-     (push-component! (forest-make-fg-component))]
+     (when focused? (push-component! (forest-make-fg-component)))]
 
     [*forest-focused*
      (forest-switch-to-editor!)]
 
+    [(not focused?) void]
+
     [else
      (set! *forest-focused* #t)
-     (forest-scan-git-ignored! (helix-find-workspace))
+     (forest-scan-git-state! (helix-find-workspace))
      (forest-reveal-current-file!)
      (push-component! (forest-make-fg-component))]))
 
@@ -1409,25 +1538,13 @@
 (struct ForestMiniColumn (path entries cursor))
 
 (define (forest-mini-list-dir path)
-  (define children
-    (filter (lambda (p)
-              (define name (file-name p))
-              (not (or (hashset-contains? *forest-ignore-set* name)
-                       (and (not *forest-show-hidden*) (forest-dotfile? name))
-                       (and (not *forest-show-git-ignored*) (forest-git-ignored? p)))))
-            (with-handler (lambda (_) '()) (read-dir path))))
-  (map (lambda (p) (cons p (file-name p))) (forest-sort-entries children)))
+  (filter (lambda (entry) (forest-visible-path? (car entry)))
+          (forest-read-directory path)))
 
 (define (forest-mini-cursor col) (unbox (ForestMiniColumn-cursor col)))
 (define (forest-mini-set-cursor! col v) (set-box! (ForestMiniColumn-cursor col) v))
 
-(define (forest-mini-last lst)
-  (if (null? (cdr lst)) (car lst) (forest-mini-last (cdr lst))))
-
-(define (forest-mini-drop-last lst)
-  (if (null? (cdr lst)) '() (cons (car lst) (forest-mini-drop-last (cdr lst)))))
-
-(define (forest-mini-active-column) (forest-mini-last *forest-mini-stack*))
+(define (forest-mini-active-column) (last *forest-mini-stack*))
 
 (define (forest-mini-current-entry)
   (define col (forest-mini-active-column))
@@ -1451,7 +1568,7 @@
   (define entry (forest-mini-current-entry))
   (cond
     [(not entry) event-result/consume]
-    [(is-dir? (car entry))
+    [(list-ref entry 2)
      (set! *forest-mini-stack*
            (append *forest-mini-stack*
                    (list (ForestMiniColumn (car entry) (forest-mini-list-dir (car entry)) (box 0)))))
@@ -1466,19 +1583,9 @@
 ;; steps back to the parent column
 (define (forest-mini-back!)
   (when (> (length *forest-mini-stack*) 1)
-    (set! *forest-mini-stack* (forest-mini-drop-last *forest-mini-stack*))))
+    (set! *forest-mini-stack* (take *forest-mini-stack* (- (length *forest-mini-stack*) 1)))))
 
-;; rebuilds the active column in place after a create/rename/delete
-;; keeping the cursor in bounds
-(define (forest-mini-refresh-active!)
-  (define col (forest-mini-active-column))
-  (define new-entries (forest-mini-list-dir (ForestMiniColumn-path col)))
-  (define new-cursor (max 0 (min (forest-mini-cursor col) (- (length new-entries) 1))))
-  (set! *forest-mini-stack*
-        (append (forest-mini-drop-last *forest-mini-stack*)
-                (list (ForestMiniColumn (ForestMiniColumn-path col) new-entries (box new-cursor))))))
-
-;; refesh after toggle
+;; refreshes every column after a visibility toggle
 (define (forest-mini-refresh-all!)
   (set! *forest-mini-stack*
         (map (lambda (col)
@@ -1486,6 +1593,10 @@
                (define new-cursor (max 0 (min (forest-mini-cursor col) (- (length new-entries) 1))))
                (ForestMiniColumn (ForestMiniColumn-path col) new-entries (box new-cursor)))
              *forest-mini-stack*)))
+
+(define (forest-mini-refresh!)
+  (forest-scan-git-state! (helix-find-workspace))
+  (forest-mini-refresh-all!))
 
 (set! *forest-refresh-mini-fn* forest-mini-refresh-all!)
 
@@ -1511,9 +1622,9 @@
     (cond
       [(null? comps) (reverse (cons (ForestMiniColumn dir entries (box 0)) acc))]
       [else
-       (define idx (forest-mini-index-of (map cdr entries) (car comps)))
+       (define idx (forest-mini-index-of (map cadr entries) (car comps)))
        (define col (ForestMiniColumn dir entries (box (if idx idx 0))))
-       (if (and idx (pair? (cdr comps)))
+       (if (and idx (pair? (cdr comps)) (list-ref (list-ref entries idx) 2))
            (loop (car (list-ref entries idx)) (cdr comps) (cons col acc))
            (reverse (cons col acc)))])))
 
@@ -1525,23 +1636,10 @@
       (forest-mini-build-stack-for root path)
       (list (ForestMiniColumn root (forest-mini-list-dir root) (box 0)))))
 
-;; flat recursive file list for search, independent of the cascaded columns
-(define (forest-mini-scan-files root)
-  (define prefix (string-append root (path-separator)))
-  (define acc '())
-  (define (walk dir)
-    (for-each
-     (lambda (p)
-       (unless (hashset-contains? *forest-ignore-set* (file-name p))
-         (if (is-dir? p) (walk p) (set! acc (cons p acc)))))
-     (with-handler (lambda (_) '()) (read-dir dir))))
-  (walk root)
-  (sort (map (lambda (p) (substring p (string-length prefix) (string-length p))) acc) string<?))
-
 ;; panels grow and shrink with their own content with safe bound clamping
 (define (forest-mini-longest-name entries)
   (let loop ([lst entries] [best 0])
-    (if (null? lst) best (loop (cdr lst) (max best (string-length (cdr (car lst))))))))
+    (if (null? lst) best (loop (cdr lst) (max best (string-length (cadr (car lst))))))))
 
 (define *forest-mini-width-boost* 0)
 
@@ -1573,16 +1671,9 @@
       (forest-mini-window-start cursor count height)))
 
 (define *forest-mini-preview-max-lines* 200)
+(define *forest-mini-preview-max-bytes* 65536)
 (define *forest-mini-preview-min-w* 15)
 (define *forest-mini-preview-max-w* 70)
-
-(define (forest-mini-preview-lines path max-lines)
-  (with-handler
-    (lambda (_) (list "(unable to preview)"))
-    (let* ([p (open-input-file path)]
-           [content (read-port-to-string p)])
-      (close-input-port p)
-      (forest-take (split-many content "\n") max-lines))))
 
 (define (forest-mini-longest-line lines cap)
   (let loop ([lst lines] [best 0])
@@ -1592,76 +1683,28 @@
   (define entry (forest-mini-current-entry))
   (cond
     [(not entry) (list 'empty #f)]
-    [(is-dir? (car entry)) (list 'dir (forest-mini-list-dir (car entry)))]
-    [(is-file? (car entry)) (list 'file (forest-mini-preview-lines (car entry) *forest-mini-preview-max-lines*))]
+    [(list-ref entry 2) (list 'dir (forest-mini-list-dir (car entry)))]
+    [(is-file? (car entry))
+     (list 'file
+           (list-ref (forest-read-preview (car entry)
+                                          *forest-mini-preview-max-lines*
+                                          *forest-mini-preview-max-bytes*)
+                     0))]
     [else (list 'empty #f)]))
 
 (define (forest-mini-prompt-create!)
   (define col (forest-mini-active-column))
-  (define base (string-append (ForestMiniColumn-path col) (path-separator)))
-  (enqueue-thread-local-callback
-   (lambda ()
-     (forest-show-modal!
-      'input
-      (string-append "New (end with " (path-separator) " for dir): ")
-      (forest-relpath base)
-      (lambda (name)
-        (define full (string-append (helix-find-workspace) (path-separator) name))
-        (with-handler
-          (lambda (err) (forest-error (string-append "create failed: " (error-object-message err))))
-          (begin
-            (if (ends-with? name (path-separator))
-                (forest-run-mkdir-p! full)
-                (begin
-                  (forest-run-mkdir-p! (forest-parent-path full))
-                  (forest-run-touch! full)
-                  (helix.open full)))
-            (forest-info (string-append "created " name))))
-        (enqueue-thread-local-callback forest-mini-refresh-active!))))))
+  (forest-prompt-create-at!
+   (string-append (ForestMiniColumn-path col) (path-separator))
+   forest-mini-refresh!))
 
 (define (forest-mini-prompt-rename!)
   (define entry (forest-mini-current-entry))
-  (when entry
-    (define path (car entry))
-    (define name (file-name path))
-    (define dir (trim-end-matches path (string-append (path-separator) name)))
-    (enqueue-thread-local-callback
-     (lambda ()
-       (forest-show-modal!
-        'input
-        "Rename: "
-        name
-        (lambda (new-name)
-          (when (and (not (equal? new-name "")) (not (equal? new-name name)))
-            (with-handler
-              (lambda (err) (forest-error (string-append "rename failed: " (error-object-message err))))
-              (begin
-                (forest-run-mv! path (string-append dir (path-separator) new-name))
-                (forest-info (string-append "renamed " name " -> " new-name))))
-            (enqueue-thread-local-callback forest-mini-refresh-active!))))))))
+  (when entry (forest-prompt-rename-entry! entry forest-mini-refresh!)))
 
 (define (forest-mini-prompt-delete!)
   (define entry (forest-mini-current-entry))
-  (when entry
-    (define path (car entry))
-    (define name (file-name path))
-    (define kind (if (is-dir? path) "directory" "file"))
-    (enqueue-thread-local-callback
-     (lambda ()
-       (forest-show-modal!
-        'confirm
-        (string-append "Delete " kind " '" name "'? (y/N) ")
-        ""
-        (lambda (confirmed?)
-          (when confirmed?
-            (with-handler
-              (lambda (err) (forest-error (string-append "delete failed: " (error-object-message err))))
-              (begin
-                (if (is-dir? path)
-                    (delete-directory! path) ; only works if empty
-                    (delete-file! path))
-                (forest-info (string-append "deleted " name))))
-            (enqueue-thread-local-callback forest-mini-refresh-active!))))))))
+  (when entry (forest-prompt-delete-entry! entry forest-mini-refresh!)))
 
 ;; searches the whole workspace and re-cascades the stack to the match
 (define (forest-mini-prompt-search!)
@@ -1674,7 +1717,8 @@
       ""
       (lambda (query)
         (unless (equal? query "")
-          (define matches (fuzzy-match query (forest-mini-scan-files root)))
+          (forest-scan-files!)
+          (define matches (fuzzy-match query *forest-all-files*))
           (if (null? matches)
               (forest-error (string-append "no matches for '" query "'"))
               (set! *forest-mini-stack*
@@ -1686,19 +1730,19 @@
                                text-style hl-style dir-style dim-style)
   (if (null? entries)
       (frame-set-string! frame x y0 (forest-truncate "(empty)" w) dim-style)
-      (let iloop ([items (forest-take (forest-drop entries ws) h)] [row 0])
+      (let iloop ([items (take (forest-drop entries ws) h)] [row 0])
         (unless (or (null? items) (>= row h))
           (define e (car items))
           (define idx (+ ws row))
-          (define dir? (is-dir? (car e)))
+          (define dir? (list-ref e 2))
           (define hl? (and active? (= idx cursor)))
-          (define icon (if dir? (glyph-dir-icon (cdr e)) (glyph-icon (cdr e))))
-          (define icon-color (if dir? (glyph-dir-color (cdr e)) (glyph-color (cdr e))))
+          (define icon (if dir? (glyph-dir-icon (cadr e)) (glyph-icon (cadr e))))
+          (define icon-color (if dir? (glyph-dir-color (cadr e)) (glyph-color (cadr e))))
           (define git-status (and (not dir?) (forest-git-status (car e))))
           (define git-icon (if git-status (glyph-git-icon git-status) " "))
           (define git-color (if git-status (glyph-git-color git-status) #f))
           (define row-style (cond [hl? hl-style] [dir? dir-style] [else text-style]))
-          (define name (string-append (cdr e) (if dir? (path-separator) "")))
+          (define name (string-append (cadr e) (if dir? (path-separator) "")))
           (define icon-w (string-length icon))
           (define git-x (+ x icon-w 1))
           (define git-w (if dir? 0 1))
@@ -1716,7 +1760,7 @@
 
 ;; file-preview panel in plain text
 (define (forest-mini-render-lines frame x y0 w h lines style)
-  (let iloop ([items (forest-take lines h)] [row 0])
+  (let iloop ([items (take lines h)] [row 0])
     (unless (or (null? items) (>= row h))
       (frame-set-string! frame x (+ y0 row) (forest-truncate (car items) w) style)
       (iloop (cdr items) (+ row 1)))))
@@ -1779,7 +1823,7 @@
        [else
         ;; clicking an ancestor drops the cascade off it, as h repeatedly would
         (when (and idx (not active?))
-          (set! *forest-mini-stack* (forest-take *forest-mini-stack* (+ idx 1))))
+          (set! *forest-mini-stack* (take *forest-mini-stack* (+ idx 1))))
         (forest-mini-set-cursor! col entry-idx)
         (forest-arm-click! slot)
         (set! *forest-mini-click-window* (list col ws))
@@ -1793,7 +1837,7 @@
   (cond
     ;; a short directory is padded to the minimum height; that padding is inert
     [(or (< row 0) (>= row (cadr *forest-mini-hit-preview*))) event-result/consume]
-    [(not (and entry (is-dir? (car entry)))) event-result/consume]
+    [(not (and entry (list-ref entry 2))) event-result/consume]
     [else
      (define result (forest-mini-enter!))
      (define col (forest-mini-active-column))
@@ -1946,7 +1990,7 @@
     [(equal? action 'create) (forest-mini-prompt-create!) event-result/consume]
     [(equal? action 'rename) (forest-mini-prompt-rename!) event-result/consume]
     [(equal? action 'delete) (forest-mini-prompt-delete!) event-result/consume]
-    [(equal? action 'refresh) (forest-mini-refresh-active!) event-result/consume]
+    [(equal? action 'refresh) (forest-mini-refresh!) event-result/consume]
     [(equal? action 'search) (forest-mini-prompt-search!) event-result/consume]
     [(equal? action 'toggle-hidden) (forest-toggle-hidden!) event-result/consume]
     [(equal? action 'toggle-git-ignored) (forest-toggle-git-ignored!) event-result/consume]
@@ -1978,6 +2022,9 @@
     ;; do not register keys when doing new/rename
     [*forest-modal-open?* event-result/ignore]
     [*forest-help-open?* event-result/ignore]
+    [(forest-toggle-event? event)
+     (forest-mini-close!)
+     event-result/close]
     [(mouse-event? event) (forest-mini-handle-mouse state event)]
     [else
      ;; any keypress can move the cursor, so an armed entry stops meaning anything
@@ -1990,7 +2037,7 @@
 (define (forest-mini-open!)
   (cond
     [(not *forest-active*)
-     (forest-scan-git-ignored! (helix-find-workspace))
+     (forest-scan-git-state! (helix-find-workspace))
      (set! *forest-mini-stack* (forest-mini-reveal-current-file!))
      (set! *forest-active* #t)
      (push-component! (forest-mini-make-component))]
@@ -1998,10 +2045,10 @@
 
 ;;@doc
 ;; Open the file tree
-(define (forest-open)
+(define (forest-open #:focused [focused? #t])
   (if (equal? *forest-style* 'mini)
       (forest-mini-open!)
-      (forest-snacks-open!)))
+      (forest-snacks-open! focused?)))
 
 ;;@doc
 ;; Close the file tree
